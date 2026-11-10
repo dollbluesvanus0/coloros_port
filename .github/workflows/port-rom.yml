@@ -26,6 +26,13 @@ on:
         options:
           - ubuntu-24.04
           - self-hosted
+      pack_method:
+        description: Package format to build (ota for recovery payload.bin, fastboot for fastboot flashing scripts)
+        type: choice
+        default: ota
+        options:
+          - ota
+          - fastboot
 
 permissions:
   contents: read
@@ -55,6 +62,7 @@ jobs:
           PORT_INPUT: ${{ inputs.port_rom_url }}
           SECOND_PORT_INPUT: ${{ inputs.second_port_rom_url }}
           PORT_PARTS: ${{ inputs.port_parts }}
+          PACK_METHOD_INPUT: ${{ inputs.pack_method }}
         run: |
           python3 - <<'PY'
           import os, re
@@ -68,6 +76,9 @@ jobs:
               raise SystemExit('Second donor URL and port_parts must be provided together')
           if parts and not re.fullmatch(r'[A-Za-z0-9_]+(?:,[A-Za-z0-9_]+)*', parts):
               raise SystemExit('port_parts must be comma-separated partition names')
+          pack_method = os.environ.get('PACK_METHOD_INPUT', 'ota').strip().lower()
+          if pack_method not in ('ota', 'fastboot'):
+              raise SystemExit('pack_method must be ota or fastboot')
           PY
           test "$(uname -s)" = Linux
           test "$(uname -m)" = x86_64
@@ -162,6 +173,7 @@ jobs:
         timeout-minutes: 240
         env:
           PORT_LOW_DISK: 'true'
+          PACK_METHOD: ${{ inputs.pack_method }}
           SECOND_PORT_ROM_URL: ${{ env.SECOND_PORT_ROM_URL }}
           PORT_PARTS: ${{ inputs.port_parts }}
         run: |
