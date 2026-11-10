@@ -1,4 +1,4 @@
-﻿# 需要移植的分区
+# 需要移植的分区
 partition_to_port=system,system_ext,product,my_product,my_engineering,my_stock,my_heytap,my_carrier,my_region,my_bigball,my_manifest,my_company,my_preload
 
 

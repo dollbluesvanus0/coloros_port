@@ -1,4 +1,4 @@
-﻿name: Port ROM
+name: Port ROM
 
 on:
   workflow_dispatch:
