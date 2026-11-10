@@ -443,11 +443,7 @@ apk_build() {
                         ((i+=2))
                         continue
                         ;;
-                    -c)
-                        # -c is the short alias for --copy-original in older apktool versions
-                        apktool_args+=(--copy-original)
-                        ((i+=1))
-                        ;;
+
                     *)
                         apktool_args+=("${args[i]}")
                         ((i+=1))
