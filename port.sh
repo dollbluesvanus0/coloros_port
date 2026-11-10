@@ -1038,9 +1038,6 @@ elif [[ -f build/portrom/images/system/system/framework/services.jar ]];then
         fi
     done
 
-    blue "应用 APK Protection 补丁到 services.jar" "Applying APK Protection patch to services.jar"
-    python3 bin/patch_apk_protection.py tmp/services || exit 1
-
     java -jar bin/apktool/APKEditor.jar b -f -i tmp/services -o build/${app_patch_folder}/patched/services.jar 
     cp -rfv build/${app_patch_folder}/patched/services.jar build/portrom/images/system/system/framework/services.jar
 
