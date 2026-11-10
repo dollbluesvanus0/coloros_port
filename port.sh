@@ -1062,7 +1062,6 @@ else
         git commit -m "Initial smali source" > /dev/null 2>&1
         echo "🔧 应用 patch 文件 0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch ..."
         git apply ${work_dir}/devices/common/0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch && echo "✅ Patch 应用成功" || echo "❌ Patch 应用失败"
-        rm -rf .git
 
         popd
     fi
@@ -3443,5 +3442,3 @@ else
     green "输出包路径：" "Output: "
     green "$(pwd)/out/${os_type}_${rom_version}_${hash}_${port_product_model}_${pack_timestamp}_${pack_type}.zip"
 fi
-
-

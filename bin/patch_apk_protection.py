@@ -1,101 +1,115 @@
 #!/usr/bin/env python3
-"""APK Protection and Signature Verification Bypass Patch for services.jar and framework.jar.
+"""APK Protection Patch for services.jar and framework.jar.
 
-Applies comprehensive patches to disable signature verification, app downgrade checks,
-and integrity verification for ColorOS / Android 14-17:
-- ScanPackageUtils: assertMinSignatureSchemeIsValid -> return-void
-- PackageManagerServiceUtils:
-    - checkDowngrade -> return-void (bypass version downgrade block)
-    - verifySignatures -> return false (bypass PackageManagerException)
-    - matchSignaturesCompat / matchSignaturesRecover -> return true (1)
-- ApkSignatureVerifier:
-    - getMinimumSignatureSchemeVersionForTargetSdk -> return 0
-    - verifySignaturesInternal -> inject const/4 p3, 0x0 before verifyV calls (verifyFull=false)
-- SigningDetails / PackageParser$SigningDetails:
-    - checkCapability / checkCapabilityRecover / hasAncestorOrSelf -> return true (1)
-- ParsingPackageUtils:
-    - Neutralize ParseResult.isError() after verification checks
-- StrictJarVerifier:
-    - verifyMessageDigest -> return true (1)
-- ReconcilePackageUtils:
-    - Force ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS = 1
+Based on Apk-Protection-Patch (Mods-Center):
+- In com/android/server/pm/pkg/parsing/ParsingPackageUtils.smali (services.jar / framework.jar):
+  remakes getSigningDetails(...) to bypass signature verification restrictions and accept signatures
+  (with null-safety check for existingSigningDetails to prevent SystemUI / system crashes during boot).
+- In com/android/server/pm/ScanPackageUtils.smali (services.jar):
+  remakes assertMinSignatureSchemeIsValid to return void.
+- In com/android/server/pm/PackageManagerServiceUtils.smali (services.jar):
+  remakes matchSignaturesCompat and matchSignaturesRecover to return true (allow signature match).
+- In android/util/apk/ApkSignatureVerifier.smali (framework.jar / services.jar):
+  remakes getMinimumSignatureSchemeVersionForTargetSdk to return 0 and sets minSignatureSchemeVersion (p2) to 0.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import re
 import sys
 
-RETURN_VOID = """    .locals 0
-    return-void"""
-
-RETURN_TRUE = """    .locals 1
+GET_SIGNING_DETAILS_REMAKE = '''    .locals 4
+    .annotation system Ldalvik/annotation/Signature;
+        value = {
+            "(",
+            "Landroid/content/pm/parsing/result/ParseInput;",
+            "Ljava/lang/String;",
+            "ZZ",
+            "Landroid/content/pm/SigningDetails;",
+            "I)",
+            "Landroid/content/pm/parsing/result/ParseResult<",
+            "Landroid/content/pm/SigningDetails;",
+            ">;"
+        }
+    .end annotation
+    invoke-static {p5}, Landroid/util/apk/ApkSignatureVerifier;->getMinimumSignatureSchemeVersionForTargetSdk(I)I
+    move-result v0
+    if-eqz p3, :cond_1
+    const/4 v0, 0x2
+    :cond_1
+    if-eqz p2, :cond_2
     const/4 v0, 0x1
-    return v0"""
+    invoke-static {p0, p1, v0}, Landroid/util/apk/ApkSignatureVerifier;->unsafeGetCertsWithoutVerification(Landroid/content/pm/parsing/result/ParseInput;Ljava/lang/String;I)Landroid/content/pm/parsing/result/ParseResult;
+    move-result-object v1
+    goto :goto_1
+    :cond_2
+    invoke-static {p0, p1, v0}, Landroid/util/apk/ApkSignatureVerifier;->verify(Landroid/content/pm/parsing/result/ParseInput;Ljava/lang/String;I)Landroid/content/pm/parsing/result/ParseResult;
+    move-result-object v1
+    :goto_1
+    invoke-interface {v1}, Landroid/content/pm/parsing/result/ParseResult;->isError()Z
+    move-result v2
+    if-eqz v2, :cond_3
+    invoke-interface {p0, v1}, Landroid/content/pm/parsing/result/ParseInput;->error(Landroid/content/pm/parsing/result/ParseResult;)Landroid/content/pm/parsing/result/ParseResult;
+    move-result-object v2
+    return-object v2
+    :cond_3
+    if-eqz p4, :cond_ret_v1
+    sget-object v2, Landroid/content/pm/SigningDetails;->UNKNOWN:Landroid/content/pm/SigningDetails;
+    if-eq p4, v2, :cond_ret_v1
+    invoke-interface {p0, p4}, Landroid/content/pm/parsing/result/ParseInput;->success(Ljava/lang/Object;)Landroid/content/pm/parsing/result/ParseResult;
+    move-result-object v2
+    return-object v2
+    :cond_ret_v1
+    return-object v1'''
 
-RETURN_ZERO = """    .locals 1
+RETURN_VOID = '''    .locals 0
+    return-void'''
+
+RETURN_TRUE = '''    .locals 1
+    const/4 v0, 0x1
+    return v0'''
+
+RETURN_ZERO = '''    .locals 1
     const/4 v0, 0x0
-    return v0"""
-
-RETURN_FALSE = RETURN_ZERO
+    return v0'''
 
 
-def replace_all_methods(content: str, method_name: str, new_body: str) -> tuple[str, bool]:
+def replace_method(content: str, method_name: str, new_body: str) -> tuple[str, bool]:
     pattern = re.compile(
-        r"(?P<header>^[ \t]*\.method[^\n\r]*?[ \t]" + re.escape(method_name) + r"\(.*?)"
+        r"(?P<header>^\s*\.method[^\n\r]*?" + re.escape(method_name) + r"[^\n\r]*)"
         r"(?P<body>.*?)"
-        r"(?P<footer>^[ \t]*\.end method)",
+        r"(?P<footer>^\s*\.end method)",
         re.DOTALL | re.MULTILINE,
     )
-    if not pattern.search(content):
+    match = pattern.search(content)
+    if not match:
         return content, False
 
+    header = match.group("header")
+    footer = match.group("footer")
     formatted_body = "\n" + new_body.strip("\n") + "\n"
-    new_content = pattern.sub(rf"\g<header>{formatted_body}\g<footer>", content)
+    modified_block = f"{header}{formatted_body}{footer}"
+    new_content = content[:match.start()] + modified_block + content[match.end():]
     return new_content, True
-
-
-def patch_scan_package_utils(content: str) -> tuple[str, bool]:
-    return replace_all_methods(content, "assertMinSignatureSchemeIsValid", RETURN_VOID)
-
-
-def patch_pms_utils(content: str) -> tuple[str, bool]:
-    modified = False
-    for method in ("checkDowngrade",):
-        new_content, changed = replace_all_methods(content, method, RETURN_VOID)
-        if changed:
-            content, modified = new_content, True
-
-    for method in ("matchSignaturesCompat", "matchSignaturesRecover"):
-        new_content, changed = replace_all_methods(content, method, RETURN_TRUE)
-        if changed:
-            content, modified = new_content, True
-
-    for method in ("verifySignatures",):
-        new_content, changed = replace_all_methods(content, method, RETURN_FALSE)
-        if changed:
-            content, modified = new_content, True
-
-    return content, modified
 
 
 def patch_apk_signature_verifier(content: str) -> tuple[str, bool]:
     modified = False
 
     # 1. getMinimumSignatureSchemeVersionForTargetSdk -> return 0
-    new_content, changed = replace_all_methods(
-        content, "getMinimumSignatureSchemeVersionForTargetSdk", RETURN_ZERO
-    )
+    new_content, changed = replace_method(content, "getMinimumSignatureSchemeVersionForTargetSdk", RETURN_ZERO)
     if changed:
-        content, modified = new_content, True
+        content = new_content
+        modified = True
 
-    # 2. In verifySignaturesInternal, set verifyFull (p3) to 0 before verifyV calls
+    # 2. In verifySignaturesInternal, set minSignatureSchemeVersion (p2) to 0 before verifyV calls
     method_pattern = re.compile(
-        r"(?P<header>^[ \t]*\.method[^\n\r]*?verifySignaturesInternal[^\n\r]*)"
+        r"(?P<header>^\s*\.method[^\n\r]*?verifySignaturesInternal[^\n\r]*)"
         r"(?P<body>.*?)"
-        r"(?P<footer>^[ \t]*\.end method)",
+        r"(?P<footer>^\s*\.end method)",
         re.DOTALL | re.MULTILINE,
     )
     match = method_pattern.search(content)
@@ -105,14 +119,13 @@ def patch_apk_signature_verifier(content: str) -> tuple[str, bool]:
         new_lines = []
         body_modified = False
         for line in lines:
-            if "Landroid/util/apk/ApkSignatureVerifier;->verifyV" in line:
+            if "Landroid/util/apk/ApkSignatureVerifier;->verifyV" in line and "const/4 p2, 0x0" not in body:
                 indent = "    "
                 m_indent = re.match(r"^(\s*)", line)
                 if m_indent:
                     indent = m_indent.group(1)
-                if "const/4 p3, 0x0" not in "".join(new_lines[-3:]):
-                    new_lines.append(f"{indent}const/4 p3, 0x0\n")
-                    body_modified = True
+                new_lines.append(f"{indent}const/4 p2, 0x0\n")
+                body_modified = True
             new_lines.append(line)
 
         if body_modified:
@@ -124,65 +137,6 @@ def patch_apk_signature_verifier(content: str) -> tuple[str, bool]:
     return content, modified
 
 
-def patch_signing_details(content: str) -> tuple[str, bool]:
-    modified = False
-    for method in ("checkCapability", "checkCapabilityRecover", "hasAncestorOrSelf"):
-        new_content, changed = replace_all_methods(content, method, RETURN_TRUE)
-        if changed:
-            content, modified = new_content, True
-    return content, modified
-
-
-def patch_parsing_package_utils(content: str) -> tuple[str, bool]:
-    modified = False
-    lines = content.splitlines(keepends=True)
-    new_lines = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        new_lines.append(line)
-        if "Landroid/content/pm/parsing/result/ParseResult;->isError()Z" in line:
-            if i + 1 < len(lines):
-                next_line = lines[i + 1]
-                m = re.search(r"^\s*move-result\s+([vp]\d+)", next_line)
-                if m:
-                    reg = m.group(1)
-                    indent = re.match(r"^(\s*)", next_line).group(1)
-                    new_lines.append(next_line)
-                    new_lines.append(f"{indent}const/4 {reg}, 0x0\n")
-                    i += 2
-                    modified = True
-                    continue
-        i += 1
-    if modified:
-        return "".join(new_lines), True
-    return content, False
-
-
-def patch_reconcile_package_utils(content: str) -> tuple[str, bool]:
-    modified = False
-    lines = content.splitlines(keepends=True)
-    new_lines = []
-    for line in lines:
-        m = re.search(
-            r"^\s*sput-boolean\s+([vp]\d+),\s*Lcom/android/server/pm/ReconcilePackageUtils;->ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS:Z",
-            line,
-        )
-        if m:
-            reg = m.group(1)
-            indent = re.match(r"^(\s*)", line).group(1)
-            new_lines.append(f"{indent}const/4 {reg}, 0x1\n")
-            modified = True
-        new_lines.append(line)
-    if modified:
-        return "".join(new_lines), True
-    return content, False
-
-
-def patch_strict_jar_verifier(content: str) -> tuple[str, bool]:
-    return replace_all_methods(content, "verifyMessageDigest", RETURN_TRUE)
-
-
 def patch_apk_protection(decompiled_dir: Path | str) -> dict[str, list[str]]:
     root = Path(decompiled_dir)
     patched_records: dict[str, list[str]] = {}
@@ -191,49 +145,46 @@ def patch_apk_protection(decompiled_dir: Path | str) -> dict[str, list[str]]:
         print(f"[!] Directory not found: {root}")
         return patched_records
 
-    for smali_file in root.rglob("*.smali"):
-        name = smali_file.name
+    # 1. ParsingPackageUtils: getSigningDetails
+    for smali_file in root.rglob("ParsingPackageUtils.smali"):
         text = smali_file.read_text(encoding="utf-8", errors="ignore")
-        changed = False
-
-        if name == "ScanPackageUtils.smali":
-            new_text, changed = patch_scan_package_utils(text)
-            if changed:
-                patched_records.setdefault(str(smali_file), []).append("ScanPackageUtils")
-
-        elif name == "PackageManagerServiceUtils.smali":
-            new_text, changed = patch_pms_utils(text)
-            if changed:
-                patched_records.setdefault(str(smali_file), []).append("PackageManagerServiceUtils")
-
-        elif name == "ApkSignatureVerifier.smali":
-            new_text, changed = patch_apk_signature_verifier(text)
-            if changed:
-                patched_records.setdefault(str(smali_file), []).append("ApkSignatureVerifier")
-
-        elif name in ("SigningDetails.smali", "PackageParser$SigningDetails.smali"):
-            new_text, changed = patch_signing_details(text)
-            if changed:
-                patched_records.setdefault(str(smali_file), []).append("SigningDetails")
-
-        elif name == "ParsingPackageUtils.smali":
-            new_text, changed = patch_parsing_package_utils(text)
-            if changed:
-                patched_records.setdefault(str(smali_file), []).append("ParsingPackageUtils")
-
-        elif name == "ReconcilePackageUtils.smali":
-            new_text, changed = patch_reconcile_package_utils(text)
-            if changed:
-                patched_records.setdefault(str(smali_file), []).append("ReconcilePackageUtils")
-
-        elif name == "StrictJarVerifier.smali":
-            new_text, changed = patch_strict_jar_verifier(text)
-            if changed:
-                patched_records.setdefault(str(smali_file), []).append("StrictJarVerifier")
-
+        new_text, changed = replace_method(text, "getSigningDetails", GET_SIGNING_DETAILS_REMAKE)
         if changed:
             smali_file.write_text(new_text, encoding="utf-8")
-            print(f"[+] Patched {patched_records[str(smali_file)]} in {smali_file}")
+            patched_records.setdefault(str(smali_file), []).append("getSigningDetails")
+            print(f"[+] Patched getSigningDetails in {smali_file}")
+
+    # 2. ScanPackageUtils: assertMinSignatureSchemeIsValid
+    for smali_file in root.rglob("ScanPackageUtils.smali"):
+        text = smali_file.read_text(encoding="utf-8", errors="ignore")
+        new_text, changed = replace_method(text, "assertMinSignatureSchemeIsValid", RETURN_VOID)
+        if changed:
+            smali_file.write_text(new_text, encoding="utf-8")
+            patched_records.setdefault(str(smali_file), []).append("assertMinSignatureSchemeIsValid")
+            print(f"[+] Patched assertMinSignatureSchemeIsValid in {smali_file}")
+
+    # 3. PackageManagerServiceUtils: matchSignaturesCompat, matchSignaturesRecover
+    for smali_file in root.rglob("PackageManagerServiceUtils.smali"):
+        text = smali_file.read_text(encoding="utf-8", errors="ignore")
+        file_changed = False
+        for method_name in ("matchSignaturesCompat", "matchSignaturesRecover"):
+            new_text, changed = replace_method(text, method_name, RETURN_TRUE)
+            if changed:
+                text = new_text
+                file_changed = True
+                patched_records.setdefault(str(smali_file), []).append(method_name)
+                print(f"[+] Patched {method_name} in {smali_file}")
+        if file_changed:
+            smali_file.write_text(text, encoding="utf-8")
+
+    # 4. ApkSignatureVerifier: in framework.jar or services.jar
+    for smali_file in root.rglob("ApkSignatureVerifier.smali"):
+        text = smali_file.read_text(encoding="utf-8", errors="ignore")
+        new_text, changed = patch_apk_signature_verifier(text)
+        if changed:
+            smali_file.write_text(new_text, encoding="utf-8")
+            patched_records.setdefault(str(smali_file), []).append("ApkSignatureVerifier")
+            print(f"[+] Patched ApkSignatureVerifier in {smali_file}")
 
     return patched_records
 
@@ -250,7 +201,7 @@ def main() -> int:
 
     records = patch_apk_protection(target)
     total_patched = sum(len(methods) for methods in records.values())
-    print(f"[*] APK Protection patch finished. Patched {total_patched} method groups across {len(records)} files.")
+    print(f"[*] APK Protection patch finished. Patched {total_patched} methods across {len(records)} files.")
     return 0
 
 
