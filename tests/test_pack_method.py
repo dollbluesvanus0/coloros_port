@@ -43,7 +43,7 @@ class PackMethodTests(unittest.TestCase):
             elif [[ "${{_norm_pack_method}}" == "ota" || "${{_norm_pack_method}}" == "stock" ]]; then
                 pack_method="stock"
             else
-                error "pack_method ??? ota ? fastboot"
+                error "pack_method 必须为 ota 或 fastboot"
                 exit 2
             fi
             printf '%s' "${{pack_method}}"
