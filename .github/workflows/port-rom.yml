@@ -108,6 +108,7 @@ jobs:
           python3 tests/smoke_cos17_engineer.py
           python3 tests/smoke_apktool_resources.py
           python3 tests/test_fetch_rom_url.py
+          cargo test --manifest-path tools/dex-patcher/Cargo.toml
 
       - name: Resolve ROM URLs
         env:
@@ -222,3 +223,4 @@ jobs:
               tail -n 80 -- "$log"
             fi
           done
+
