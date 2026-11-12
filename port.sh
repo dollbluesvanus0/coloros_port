@@ -363,7 +363,7 @@ elif [[ ${baserom_type} == 'br' ]]; then
 
         if [[ $name =~ [0-9] ]]; then
             new_name=$(echo "$name" | sed 's/[0-9]\+\(\.[^0-9]\+\)/\1/g' | sed 's/\.\./\./g')
-            mv -fv "$file" "build/baserom/${new_name}.${extension}"
+            mv -f "$file" "build/baserom/${new_name}.${extension}"
         fi
     done
 
@@ -394,7 +394,7 @@ elif [[ ${baserom_type} == 'img' ]]; then
         exit 1
     }
     # 移动所有 img 文件
-    find build/baserom/tmp/ -type f -name "*.img" -exec mv -fv {} build/baserom/images/ \;
+    find build/baserom/tmp/ -type f -name "*.img" -exec mv -f {} build/baserom/images/ \;
     rm -rf build/baserom/tmp/
     green "底包 [*.img] 提取完毕" "[*.img] extracted."
 else
@@ -974,7 +974,7 @@ ensure_android_ext_shared_library || exit 1
 old_face_unlock_app=$(find build/baserom/images/my_product -type f -name "OPFaceUnlock.apk" -print -quit)
 if [[ -f build/${app_patch_folder}/patched/services.jar ]];then
     blue "复制已经处理过的services.jar"
-    cp -rfv build/${app_patch_folder}/patched/services.jar build/portrom/images/system/system/framework/services.jar
+    cp -rf build/${app_patch_folder}/patched/services.jar build/portrom/images/system/system/framework/services.jar
 elif [[ -f build/portrom/images/system/system/framework/services.jar ]];then 
     mkdir -p tmp "build/${app_patch_folder}/patched"
     cp -rf build/portrom/images/system/system/framework/services.jar tmp/services.jar
@@ -990,12 +990,12 @@ elif [[ -f build/portrom/images/system/system/framework/services.jar ]];then
         blue "使用 dex-patcher 直接修补 services.jar" "Patched services.jar via dex-patcher"
         mv -f -- "build/${app_patch_folder}/patched/services.jar.new.jar" \
             "build/${app_patch_folder}/patched/services.jar" || exit 1
-        cp -rfv "build/${app_patch_folder}/patched/services.jar" \
+        cp -rf "build/${app_patch_folder}/patched/services.jar" \
             build/portrom/images/system/system/framework/services.jar || exit 1
     else
         rm -f -- "build/${app_patch_folder}/patched/services.jar.new.jar"
         mkdir -p tmp/services/
-        java -jar bin/apktool/APKEditor.jar d -f -i tmp/services.jar -o tmp/services
+        _port::run_apkeditor bin/apktool/APKEditor.jar d -f -i tmp/services.jar -o tmp/services
 
 
         smalis=("ScanPackageUtils")
@@ -1055,15 +1055,15 @@ elif [[ -f build/portrom/images/system/system/framework/services.jar ]];then
             fi
         done
 
-        java -jar bin/apktool/APKEditor.jar b -f -i tmp/services -o build/${app_patch_folder}/patched/services.jar 
-        cp -rfv build/${app_patch_folder}/patched/services.jar build/portrom/images/system/system/framework/services.jar
+        _port::run_apkeditor bin/apktool/APKEditor.jar b -f -i tmp/services -o build/${app_patch_folder}/patched/services.jar 
+        cp -rf build/${app_patch_folder}/patched/services.jar build/portrom/images/system/system/framework/services.jar
     fi
 
 fi
 
 if [[ -f build/${app_patch_folder}/patched/framework.jar ]];then
     blue "复制已经处理过的framework.jar"
-    cp -rfv build/${app_patch_folder}/patched/framework.jar build/portrom/images/system/system/framework/framework.jar
+    cp -rf build/${app_patch_folder}/patched/framework.jar build/portrom/images/system/system/framework/framework.jar
 else
     mkdir -p tmp "build/${app_patch_folder}/patched"
     cp -rf build/portrom/images/system/system/framework/framework.jar tmp/framework.jar
@@ -1073,11 +1073,11 @@ else
         blue "应用 APK Protection 补丁到 framework.jar (dex-patcher)" "Applying APK Protection patch to framework.jar (dex-patcher)"
         mv -f -- "build/${app_patch_folder}/patched/framework.jar.new.jar" \
             "build/${app_patch_folder}/patched/framework.jar" || exit 1
-        cp -rfv "build/${app_patch_folder}/patched/framework.jar" \
+        cp -rf "build/${app_patch_folder}/patched/framework.jar" \
             build/portrom/images/system/system/framework/framework.jar || exit 1
     else
         rm -f -- "build/${app_patch_folder}/patched/framework.jar.new.jar"
-        java -jar bin/apktool/APKEditor.jar d -f -i tmp/framework.jar -o tmp/framework -no-dex-debug
+        _port::run_apkeditor bin/apktool/APKEditor.jar d -f -i tmp/framework.jar -o tmp/framework -no-dex-debug
         if [[ -f devices/common/0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch ]]; then
             pushd tmp/framework 
             [[ -d .git ]] && rm -rf .git  
@@ -1093,8 +1093,8 @@ else
         fi
         blue "应用 APK Protection 补丁到 framework.jar" "Applying APK Protection patch to framework.jar"
         run_patch_apk_protection tmp/framework || exit 1
-        java -jar bin/apktool/APKEditor.jar b -f -i tmp/framework -o build/${app_patch_folder}/patched/framework.jar
-        cp -rfv build/${app_patch_folder}/patched/framework.jar build/portrom/images/system/system/framework/framework.jar
+        _port::run_apkeditor bin/apktool/APKEditor.jar b -f -i tmp/framework -o build/${app_patch_folder}/patched/framework.jar
+        cp -rf build/${app_patch_folder}/patched/framework.jar build/portrom/images/system/system/framework/framework.jar
     fi
 fi
 
@@ -1126,7 +1126,7 @@ elif [[ -f "${targetOplusService}" ]]; then
         cp -p -- "${oplus_service_cache}" "${targetOplusService}" || exit 1
     else
         rm -f -- "${oplus_service_cache}.new.jar"
-        java -jar bin/apktool/APKEditor.jar d -f -i "${targetOplusService}" -o tmp/OplusService || exit 1
+        _port::run_apkeditor bin/apktool/APKEditor.jar d -f -i "${targetOplusService}" -o tmp/OplusService || exit 1
         targetSmali=$(find tmp/OplusService -type f -name "OplusBgSceneManager.smali" -print -quit)
         if [[ -n "${targetSmali}" ]]; then
             run_patchmethod "${targetSmali}" "-isGmsRestricted" || exit 1
@@ -1134,7 +1134,7 @@ elif [[ -f "${targetOplusService}" ]]; then
         if [[ "${port_android_version}" == 17 ]]; then
             run_patch_cos17_engineer tmp/OplusService || exit 1
         fi
-        java -jar bin/apktool/APKEditor.jar b -f -i tmp/OplusService -o "${oplus_service_cache}.new.jar" || exit 1
+        _port::run_apkeditor bin/apktool/APKEditor.jar b -f -i tmp/OplusService -o "${oplus_service_cache}.new.jar" || exit 1
         unzip -tq "${oplus_service_cache}.new.jar" || exit 1
         mv -f -- "${oplus_service_cache}.new.jar" "${oplus_service_cache}" || exit 1
         cp -p -- "${oplus_service_cache}" "${targetOplusService}" || exit 1
@@ -1154,12 +1154,12 @@ if { [[ ${base_device_family} == "OPSM8250" ]] || [[ ${base_device_family} == "O
     #popd
 	if ensure_resource_available "devices/common/face_unlock_fix_common.zip"; then
         rm -rf build/portrom/images/vendor/overlay/*
-        unzip -o devices/common/face_unlock_fix_common.zip -d ${work_dir}/build/portrom/images/
+        unzip -qo devices/common/face_unlock_fix_common.zip -d ${work_dir}/build/portrom/images/
         
     fi
 	
     if ensure_resource_available "${work_dir}/devices/${base_product_device}/face_unlock_fix.zip" && [[ -f $old_face_unlock_app ]]; then
-        unzip -o ${work_dir}/devices/${base_product_device}/face_unlock_fix.zip -d ${work_dir}/build/portrom/images/
+        unzip -qo ${work_dir}/devices/${base_product_device}/face_unlock_fix.zip -d ${work_dir}/build/portrom/images/
         rm -rf build/portrom/images/odm/lib/vendor.oneplus.faceunlock.hal@1.0.so
         rm -rf build/portrom/images/odm/bin/hw/vendor.oneplus.faceunlock.hal@1.0-service
         rm -rf build/portrom/images/odm/lib/vendor.oneplus.faceunlock.hal-V1-ndk_platform.so
@@ -1174,8 +1174,8 @@ fi
 
 if [[ ${base_android_version} == 13 ]] && [[ ${port_android_version} == 14 ]];then
     if ensure_resource_available "devices/common/a13_base_fix.zip"; then
-        unzip -o devices/common/a13_base_fix.zip -d ${work_dir}/build/portrom/images/
-        rm -rfv build/portrom/images/odm/bin/hw/vendor.oplus.hardware.charger@1.0-service \
+        unzip -qo devices/common/a13_base_fix.zip -d ${work_dir}/build/portrom/images/
+        rm -rf build/portrom/images/odm/bin/hw/vendor.oplus.hardware.charger@1.0-service \
             build/portrom/images/odm/bin/hw/vendor.oplus.hardware.wifi@1.1-service \
             build/portrom/images/odm/etc/init/vendor.oplus.hardware.charger@1.0-service.rc \
             build/portrom/images/odm/etc/init/vendor.oplus.hardware.felica@1.0-service.rc \
@@ -1196,14 +1196,14 @@ fi
 if [[ ${port_android_version} -ge 15 ]]; then
     if [[ ${base_device_family} == "OPSM8250" ]] && [[ ${base_android_version} != 13 ]];then
         if ensure_resource_available "devices/common/ril_fix_sm8250.zip"; then
-            unzip -o devices/common/ril_fix_sm8250.zip -d ${work_dir}/build/portrom/images/
+            unzip -qo devices/common/ril_fix_sm8250.zip -d ${work_dir}/build/portrom/images/
         fi
         rm -rf build/portrom/images/odm/lib/libmindroid-app.so \
             build/portrom/images/odm/lib64/vendor.oplus.hardware.subsys_radio-V1-ndk_platform.so \
             build/portrom/images/odm/lib64/vendor.oplus.hardware.subsys-V1-ndk_platform.so
     elif [[ ${base_device_family} == "OPSM8350" ]];then
         if ensure_resource_available "devices/common/ril_fix_sm8350.zip"; then
-            unzip -o devices/common/ril_fix_sm8350.zip -d ${work_dir}/build/portrom/images/
+            unzip -qo devices/common/ril_fix_sm8350.zip -d ${work_dir}/build/portrom/images/
         fi
         rm -rf build/portrom/images/odm/lib/libmindroid-app.so \
             build/portrom/images/odm/lib/libmindroid-framework.so \
@@ -1217,7 +1217,7 @@ if [[ ${port_android_version} -ge 15 ]]; then
         charger_v3=$(find build/portrom/images/odm/bin/hw/ -type f -name "vendor.oplus.hardware.charger-V3-service")
         if [[ -f $charger_v3 ]];then
         if ensure_resource_available "devices/common/charger-v6-update.zip"; then
-            unzip -o devices/common/charger-v6-update.zip -d ${work_dir}/build/portrom/images/
+            unzip -qo devices/common/charger-v6-update.zip -d ${work_dir}/build/portrom/images/
         fi
         rm -rf build/portrom/images/odm/bin/hw/vendor.oplus.hardware.charger-V3-service \
             build/portrom/images/odm/etc/init/vendor.oplus.hardware.charger-V3-service.rc \
@@ -1227,7 +1227,7 @@ if [[ ${port_android_version} -ge 15 ]]; then
     elif [[ ${base_android_version} == 13 ]];then
         #Ril Fix
         if ensure_resource_available "devices/common/ril_fix_a13_to_a15.zip"; then
-            unzip -o devices/common/ril_fix_a13_to_a15.zip -d ${work_dir}/build/portrom/images/
+            unzip -qo devices/common/ril_fix_a13_to_a15.zip -d ${work_dir}/build/portrom/images/
         fi
         #Ril Fix for OxygenOS firmware (IN2013/IN2023)
         if ! grep -q "persist.vendor.radio.virtualcomm" build/portrom/images/odm/build.prop;then
@@ -1258,7 +1258,7 @@ if [[ ${port_android_version} -ge 15 ]]; then
             build/portrom/images/odm/lib64/vendor.oplus.hardware.wifi@1.1.so
         #Nfc Fix
         if ensure_resource_available "devices/common/nfc_fix_for_a13.zip"; then
-            unzip -o devices/common/nfc_fix_for_a13.zip -d ${work_dir}/build/portrom/images/
+            unzip -qo devices/common/nfc_fix_for_a13.zip -d ${work_dir}/build/portrom/images/
         fi
         rm -rf build/portrom/images/odm/bin/hw/vendor.oplus.hardware.nfc@1.0-service \
             build/portrom/images/odm/etc/init/vendor.oplus.hardware.nfc@1.0-service.rc \
@@ -1266,7 +1266,7 @@ if [[ ${port_android_version} -ge 15 ]]; then
             build/portrom/images/odm/lib/vendor.oplus.hardware.nfc@1.0.so
         if ensure_resource_available "devices/common/cryptoeng_fix_a13.zip"; then
         # Fix Privacy related features(App lock、App hide)
-            unzip -o devices/common/cryptoeng_fix_a13.zip -d ${work_dir}/build/portrom/images/
+            unzip -qo devices/common/cryptoeng_fix_a13.zip -d ${work_dir}/build/portrom/images/
         fi
     fi
 fi
@@ -1421,12 +1421,12 @@ if ensure_resource_available "devices/common/xeutoolbox.zip" && [[ $base_android
     echo "/system_ext/xbin/xeu_toolbox  u:object_r:toolbox_exec:s0" >> build/portrom/images/config/system_ext_file_contexts
     echo "/system_ext/xbin/xeu_toolbox  u:object_r:toolbox_exec:s0" >> build/portrom/images/system_ext/etc/selinux/system_ext_file_contexts
     echo "(allow init toolbox_exec (file ((execute_no_trans))))" >> build/portrom/images/system_ext/etc/selinux/system_ext_sepolicy.cil
-    unzip -o devices/common/xeutoolbox.zip -d build/portrom/images/
+    unzip -qo devices/common/xeutoolbox.zip -d build/portrom/images/
 elif [[ $base_android_version -lt 15 ]];then
     targetGallery=$(find build/portrom/images/ -type f -name "OppoGallery2.apk" -print -quit)
     if [[ -f build/${app_patch_folder}/patched/OppoGallery2.apk ]]; then
             blue "复制已经处理过的OppoGallery2"
-            cp -rfv build/${app_patch_folder}/patched/OppoGallery2.apk $targetGallery
+            cp -rf build/${app_patch_folder}/patched/OppoGallery2.apk $targetGallery
         
     elif [[ -f "${targetGallery}" ]]; then
         blue "Unlock AI Editor"
@@ -1457,7 +1457,7 @@ if [[ ${base_device_family} == "OPSM8250" ]] || [[ ${base_device_family} == "OPS
     targetBattery=$(find build/portrom/images/ -type f -name "Battery.apk" -print -quit)
     if [[ -f build/${app_patch_folder}/patched/Battery.apk ]]; then
         blue "复制已经处理过的Battery"
-        cp -rfv build/${app_patch_folder}/patched/Battery.apk $targetBattery
+        cp -rf build/${app_patch_folder}/patched/Battery.apk $targetBattery
      
     elif [[ -f "${targetBattery}" ]]; then
         blue "Patch Battery Health Maximum capacity"
@@ -1523,7 +1523,7 @@ fi
 targetSystemUI=$(find build/portrom/images/ -type f -name "SystemUI.apk" -print -quit)
 if [[ -f build/${app_patch_folder}/patched/SystemUI.apk ]]; then
         blue "复制已经处理过的SystemUI.apk"
-        cp -rfv build/${app_patch_folder}/patched/SystemUI.apk $targetSystemUI
+        cp -rf build/${app_patch_folder}/patched/SystemUI.apk $targetSystemUI
      
 elif [[ -f "$targetSystemUI" ]]; then
     mkdir -p tmp "build/${app_patch_folder}/patched"
@@ -1699,7 +1699,7 @@ elif [[ $super_extended == "false" ]] && [[ $pack_method == "stock" ]] && [[ -f 
         continue
         fi
         #mv -fv $delapp ${ext_moudle_app_folder}/
-        rm -rfv $delapp 
+        rm -rf $delapp 
     done 
 
     for debloat_app in "${debloat_apps[@]}"; do
@@ -1709,11 +1709,11 @@ elif [[ $super_extended == "false" ]] && [[ $pack_method == "stock" ]] && [[ -f 
     # Check if the directory exists before removing
     if [[ -d "$app_dir" ]]; then
         yellow "删除目录: $app_dir" "Removing directory: $app_dir"
-        rm -rfv "$app_dir"
+        rm -rf "$app_dir"
     fi
     done
 
-    cp -rfv devices/common/via build/portrom/images/product/app/
+    cp -rf devices/common/via build/portrom/images/product/app/
 elif [[ $super_extended == "false" ]] && [[ $base_product_model == "KB2000" ]] && [[ "$is_ab_device" == true ]];then
     for delapp in $(find build/portrom/images/ -maxdepth 3 -path "*/del-app/*" -type d ); do
         app_name=$(basename ${delapp})
@@ -1738,7 +1738,7 @@ elif [[ $super_extended == "false" ]] && [[ $base_product_model == "KB2000" ]] &
     # Check if the directory exists before removing
     if [[ -d "$app_dir" ]]; then
         yellow "删除目录: $app_dir" "Removing directory: $app_dir"
-        rm -rfv "$app_dir"
+        rm -rf "$app_dir"
     fi
     done
 elif [[ $super_extended == "false" ]] && [[ $base_product_model == "KB200"* ]] && [[ "$is_ab_device" == true ]];then
@@ -1750,7 +1750,7 @@ elif [[ $super_extended == "false" ]] && [[ $base_product_model == "KB200"* ]] &
     # Check if the directory exists before removing
     if [[ -d "$app_dir" ]]; then
         yellow "删除目录: $app_dir" "Removing directory: $app_dir"
-        rm -rfv "$app_dir"
+        rm -rf "$app_dir"
     fi
     done
     
@@ -1764,7 +1764,7 @@ elif [[ $super_extended == "false" ]] && [[ $base_product_model == "LE2101" ]];t
     # Check if the directory exists before removing
     if [[ -d "$app_dir" ]]; then
         yellow "删除目录: $app_dir" "Removing directory: $app_dir"
-        rm -rfv "$app_dir"
+        rm -rf "$app_dir"
     fi
     done
   #rm -rfv build/portrom/images/my_stock/del-app/*
@@ -1870,7 +1870,7 @@ blue "修复杜比音效+多应用音量调节 SM8250/SM8350" "Fix Dolby + App S
      #cp $source_dolby_lib build/portrom/images/system_ext/lib64/
      cp build/baserom/images/my_product/etc/permissions/oplus.product.features_dolby_stereo.xml build/portrom/images/my_product/etc/permissions/oplus.product.features_dolby_stereo.xml
      if ensure_resource_available "devices/common/dolby_fix.zip"; then
-         unzip -o devices/common/dolby_fix.zip -d build/portrom/images/ 
+         unzip -qo devices/common/dolby_fix.zip -d build/portrom/images/ 
      fi
 fi
 
@@ -2000,10 +2000,10 @@ cp -rf build/baserom/images/my_product/app/com.oplus.vulkanLayer build/portrom/i
 cp -rf build/baserom/images/my_product/app/com.oplus.gpudrivers.* build/portrom/images/my_product/app/
 
 mkdir -p tmp/etc/permissions tmp/etc/extension
-cp -fv build/portrom/images/my_product/etc/permissions/*.xml tmp/etc/permissions/
-cp -fv build/portrom/images/my_product/etc/extension/*.xml tmp/etc/extension/
+cp -f build/portrom/images/my_product/etc/permissions/*.xml tmp/etc/permissions/
+cp -f build/portrom/images/my_product/etc/extension/*.xml tmp/etc/extension/
 cp -rf build/baserom/images/my_product/etc/permissions/*.xml build/portrom/images/my_product/etc/permissions/
-find tmp/etc/permissions/ -type f \( -name "multimedia*.xml" -o -name "*permissions*.xml" -o -name "*google*.xml"  -o -name "*configs*.xml" -o -name "*gsm*.xml" -o -name "feature_activity_preload.xml" -o -name "*gemini*.xml" -o -name "*gms*.xml" \) -exec cp -fv {} build/portrom/images/my_product/etc/permissions/ \;
+find tmp/etc/permissions/ -type f \( -name "multimedia*.xml" -o -name "*permissions*.xml" -o -name "*google*.xml"  -o -name "*configs*.xml" -o -name "*gsm*.xml" -o -name "feature_activity_preload.xml" -o -name "*gemini*.xml" -o -name "*gms*.xml" \) -exec cp -f {} build/portrom/images/my_product/etc/permissions/ \;
 
 
 if [[ $regionmark != "CN" ]];then
@@ -2203,7 +2203,7 @@ xmlstarlet ed -L -d '//app_feature[@name="com.android.incallui.hide_call_record_
 
 if [[ $port_vendor_brand == "realme" ]];then
      if ensure_resource_available "devices/common/ai_memory_16.zip"; then
-      unzip -o devices/common/ai_memory_16.zip -d build/portrom/images/
+      unzip -qo devices/common/ai_memory_16.zip -d build/portrom/images/
      fi
 fi
 
@@ -2213,11 +2213,11 @@ if [[ ! -f $aimemory_app ]]; then
     
     if [[ $regionmark == "CN" ]];then 
         if ensure_resource_available "devices/common/ai_memory.zip"; then
-            unzip -o devices/common/ai_memory.zip -d build/portrom/images/
+            unzip -qo devices/common/ai_memory.zip -d build/portrom/images/
         fi
     else
          if ensure_resource_available "devices/common/ai_memory_in/aimemory.zip"; then
-            unzip -o devices/common/ai_memory_in/aimemory.zip -d build/portrom/images/
+            unzip -qo devices/common/ai_memory_in/aimemory.zip -d build/portrom/images/
          fi
     fi
 fi
@@ -2231,7 +2231,7 @@ done
 if [[ ! -d build/portrom/images/my_product/etc/aisubsystem ]]; then
      if [[ $regionmark != "CN" ]];then 
          if ensure_resource_available "devices/common/ai_memory_in/aisubsystem.zip"; then
-            unzip -o devices/common/ai_memory_in/aisubsystem.zip -d build/portrom/images/
+            unzip -qo devices/common/ai_memory_in/aisubsystem.zip -d build/portrom/images/
          fi
      fi
 fi
@@ -2242,7 +2242,7 @@ if [[ -d devices/common/GTMode/overlay ]] && [[ $port_android_version != "16" ]]
     add_feature_v2 app_feature "com.android.settings.device_rm^Realme设备，显示GT模式需要"
     #add_feature "com.oplus.battery.support.gt_open_gamecenter" build/portrom/images/my_product/etc/extension/com.oplus.app-features.xml
     if [[ $port_vendor_brand != "realme" ]];then
-        cp -rfv devices/common/GTMode/overlay/* build/portrom/images/
+        cp -rf devices/common/GTMode/overlay/* build/portrom/images/
     fi
 fi
 
@@ -2313,7 +2313,7 @@ remove_feature "com.oplus.battery.phoneusage.screenon.hide"
 
 EUICC_GOOGLE=$(find build/portrom/images/ -name "EuiccGoogle" -type d )
 if [[ -d $EUICC_GOOGLE ]];then
-    rm -rfv $EUICC_GOOGLE
+    rm -rf $EUICC_GOOGLE
     remove_feature "android.hardware.telephony.euicc"
     remove_feature "oplus.software.radio.esim_support_sn220u"
     remove_feature "oplus.software.radio.esim_support"
@@ -2327,7 +2327,7 @@ cp -rf  build/baserom/images/my_product/vendor/etc/* build/portrom/images/my_pro
     cp -rf  build/baserom/images/my_product/etc/camera/* build/portrom/images/my_product/etc/camera
     old_camera_app=$(find build/baserom/images/my_product -type f -name "OnePlusCamera.apk")
     if [[ -f $old_camera_app ]];then
-        cp -rfv $(dirname "$old_camera_app")* build/portrom/images/my_product/priv-app/
+        cp -rf $(dirname "$old_camera_app")* build/portrom/images/my_product/priv-app/
         if [ ! -d build/portrom/images/my_product/priv-app/etc/permissions/ ];then
             mkdir -p build/portrom/images/my_product/priv-app/etc/permissions/
         fi
@@ -2335,17 +2335,17 @@ cp -rf  build/baserom/images/my_product/vendor/etc/* build/portrom/images/my_pro
         cp -rf build/baserom/images/my_product/product_overlay/* build/portrom/images/my_product/product_overlay/
     #    find build/portrom/images/ -type f -name "*.prop" -exec  sed -i "s/ro.product.model=.*/ro.product.model=${base_market_name}/g" {} \;
     #   find build/portrom/images/ -type f -name "*.prop" -exec  grep "ro.product.model" {} \;
-        cp -rfv  build/baserom/images/my_product/priv-app/etc/permissions/*   build/portrom/images/my_product/priv-app/etc/permissions/
+        cp -rf  build/baserom/images/my_product/priv-app/etc/permissions/*   build/portrom/images/my_product/priv-app/etc/permissions/
         new_camera=$(find build/portrom/images/my_product -type f -name "OplusCamera.apk")
         if [[ -f $new_camera ]]; then
-            rm -rfv $(dirname $new_camera)
+            rm -rf $(dirname $new_camera)
         fi
         base_scanner_app=$(find build/baserom/images/ -type d -name "OcrScanner")                  
         target_scanner_app=$(find build/portrom/images/ -type d -name "OcrScanner")
         if [[ -n $base_scanner_app ]] && [[ -n $target_scanner_app ]];then
                 blue "替换原版扫一扫" "Replacing Stock OrcScanner"
-            rm -rfv $target_scanner_app/*
-            cp -rfv $base_scanner_app $target_scanner_app
+            rm -rf $target_scanner_app/*
+            cp -rf $base_scanner_app $target_scanner_app
         fi
     fi
 else
@@ -2376,9 +2376,9 @@ if [[ -d "$sourceOvoiceManagerService" ]];then
     targetOvoiceManagerService=$(find build/portrom/images/my_product -type d -name "OVoiceManagerService")
     if [[ -d "$targetOvoiceManagerService" ]];then
        # rm -rfv $targetOvoiceManagerService/* 
-        cp -rfv $sourceOvoiceManagerService/* $targetOvoiceManagerService/
+        cp -rf $sourceOvoiceManagerService/* $targetOvoiceManagerService/
     else
-        cp -rfv $sourceOvoiceManagerService build/portrom/images/my_product/priv-app/
+        cp -rf $sourceOvoiceManagerService build/portrom/images/my_product/priv-app/
     fi
 fi
 
@@ -2387,7 +2387,7 @@ if [[ ${base_product_device} == "OnePlus8T" ]];then
     add_feature_v2 oplus_feature "oplus.software.audio.voice_wakeup_support^旧版语音唤醒" "oplus.software.audio.voice_wakeup_3words_support"
     #add_feature "oplus.software.speechassist.oneshot.support" build/portrom/images/my_product/etc/extension/com.oplus.oplus-feature.xml
     if ensure_resource_available "${work_dir}/devices/common/voice_trigger_fix.zip"; then
-        unzip -o ${work_dir}/devices/common/voice_trigger_fix.zip -d ${work_dir}/build/portrom/images/
+        unzip -qo ${work_dir}/devices/common/voice_trigger_fix.zip -d ${work_dir}/build/portrom/images/
     fi
 fi
 
@@ -2396,14 +2396,14 @@ cp -rf build/baserom/images/my_product/etc/Multimedia_*.xml build/portrom/images
 
 
 if [[ -f "tmp/etc/permissions/multimedia_privapp-permissions-oplus.xml" ]];then
-    cp -rfv tmp/etc/permissions/multimedia_*.xml build/portrom/images/my_product/etc/permissions/
+    cp -rf tmp/etc/permissions/multimedia_*.xml build/portrom/images/my_product/etc/permissions/
 fi
 
 
 
 for file in $(find build/baserom/images/my_product/etc/ -type f -name "OVMS_*");do
     if [[ -f "$file" ]];then
-        cp -rfv $file build/portrom/images/my_product/etc/
+        cp -rf $file build/portrom/images/my_product/etc/
     fi
 done
 #fix chinese char
@@ -2423,7 +2423,7 @@ fi
 rm -rf build/portrom/images/my_product/media/quickboot
 cp -rf build/baserom/images/my_product/media/quickboot build/portrom/images/my_product/media/
 if ensure_resource_available "devices/common/wallpaper.zip" && [[ "$portIsColorOSGlobal" == "false" ]] && [[ "$portIsOOS" == "false" ]] && [[ "$port_android_version" -lt 16 ]];then
-    unzip -o devices/common/wallpaper.zip -d build/portrom/images
+    unzip -qo devices/common/wallpaper.zip -d build/portrom/images
  fi   
 
 rm -rf build/portrom/images/my_product/res/*
@@ -2510,21 +2510,21 @@ fi
 
 
 if [[ -d build/baserom/images/my_product/etc/vibrator ]];then
-    rm -rfv build/portrom/images/my_product/etc/vibrator
-    cp -rfv build/baserom/images/my_product/etc/vibrator build/portrom/images/my_product/etc/
+    rm -rf build/portrom/images/my_product/etc/vibrator
+    cp -rf build/baserom/images/my_product/etc/vibrator build/portrom/images/my_product/etc/
 fi
 
 
 if [[ $base_device_family == "OPSM8350" ]]; then
     if ensure_resource_available "devices/common/aon_fix_sm8350.zip"; then
-        rm -rfv build/portrom/images/my_product/overlay/aon*.apk
-        unzip -o devices/common/aon_fix_sm8350.zip -d build/portrom/images/
+        rm -rf build/portrom/images/my_product/overlay/aon*.apk
+        unzip -qo devices/common/aon_fix_sm8350.zip -d build/portrom/images/
     fi
 
 elif [[ $base_device_family == "OPSM8250" ]]; then
     if ensure_resource_available "devices/common/aon_fix_sm8250.zip"; then
-        rm -rfv build/portrom/images/my_product/overlay/aon*.apk
-        unzip -o devices/common/aon_fix_sm8250.zip -d build/portrom/images/
+        rm -rf build/portrom/images/my_product/overlay/aon*.apk
+        unzip -qo devices/common/aon_fix_sm8250.zip -d build/portrom/images/
     fi
 else
 
@@ -2533,10 +2533,10 @@ else
     if [[ -d "$sourceAONService" ]];then
         targetAONService=$(find build/portrom/images/my_product -type d -name "AONService")
         if [[ -d "$targetAONService" ]];then
-            rm -rfv $targetAONService/* 
-            cp -rfv $sourceAONService/* $targetAONService/
+            rm -rf $targetAONService/* 
+            cp -rf $sourceAONService/* $targetAONService/
         else
-            cp -rfv $sourceAONService build/portrom/images/my_product/app/
+            cp -rf $sourceAONService build/portrom/images/my_product/app/
         fi
         
         add_feature "oplus.software.aon_pay_qrcode_enable" build/portrom/images/my_product/etc/extension/com.oplus.oplus-feature.xml
@@ -2544,12 +2544,12 @@ else
 
     fi
     if ! compgen -G "build/baserom/images/my_product/overlay/aon*.apk" >/dev/null && [[ $regionmark == "CN" ]];then
-        rm -rfv build/portrom/images/my_product/overlay/aon*.apk
+        rm -rf build/portrom/images/my_product/overlay/aon*.apk
     fi
 fi
 #Realme隔空手势 CN限定
 if ensure_resource_available "devices/common/realme_gesture.zip" && [[ port_vendor_brand != "realme" ]] && [[ $port_android_version -lt "16" ]];then
-    unzip -o devices/common/realme_gesture.zip -d build/portrom/images/
+    unzip -qo devices/common/realme_gesture.zip -d build/portrom/images/
     sed -i "s/ro.camera.privileged.3rdpartyApp=.*/ro.camera.privileged.3rdpartyApp=com.aiunit.aon\;com.oplus.gesture\;/g" build/portrom/images/my_stock/build.prop
 fi
 
@@ -2562,11 +2562,11 @@ if [[ "${base_product_device}" == "OnePlus9Pro" ]] ||[[ "${base_product_device}"
                 rm -rf build/portrom/images/my_product/app/OplusCamera
                 rm -rf build/portrom/images/my_product/product_overlay/framework/com.oplus.camera.*.jar
                 echo "ro.vendor.oplus.camera.isSupportLumo=1" >> build/portrom/images/my_product/etc/bruce/build.prop
-                unzip -o devices/common/camera6.0-fix_cos.zip -d build/portrom/images/
+                unzip -qo devices/common/camera6.0-fix_cos.zip -d build/portrom/images/
                 if ensure_resource_available "devices/${base_product_device}/camera6.0-fix_odm.zip"; then
-                    unzip -o devices/${base_product_device}/camera6.0-fix_odm.zip -d build/portrom/images/
+                    unzip -qo devices/${base_product_device}/camera6.0-fix_odm.zip -d build/portrom/images/
                 else
-                    unzip -o devices/${base_product_device}/camera5.0-fix_odm.zip -d build/portrom/images/
+                    unzip -qo devices/${base_product_device}/camera5.0-fix_odm.zip -d build/portrom/images/
                 fi
             fi
         elif [[ $port_android_version == "16" ]];then
@@ -2575,11 +2575,11 @@ if [[ "${base_product_device}" == "OnePlus9Pro" ]] ||[[ "${base_product_device}"
                 rm -rf build/portrom/images/my_product/app/OplusCamera
                 rm -rf build/portrom/images/my_product/product_overlay/framework/com.oplus.camera.*.jar
                 echo "ro.vendor.oplus.camera.isSupportLumo=1" >> build/portrom/images/my_product/etc/bruce/build.prop
-                unzip -o devices/common/camera6.0-fix_cos.zip -d build/portrom/images/
+                unzip -qo devices/common/camera6.0-fix_cos.zip -d build/portrom/images/
                 if ensure_resource_available "devices/${base_product_device}/camera6.0-fix_odm.zip"; then
-                    unzip -o devices/${base_product_device}/camera6.0-fix_odm.zip -d build/portrom/images/
+                    unzip -qo devices/${base_product_device}/camera6.0-fix_odm.zip -d build/portrom/images/
                 else
-                    unzip -o devices/${base_product_device}/camera5.0-fix_odm.zip -d build/portrom/images/
+                    unzip -qo devices/${base_product_device}/camera5.0-fix_odm.zip -d build/portrom/images/
                 fi
             fi
         elif [[ $port_android_version -ge "15" ]];then
@@ -2588,9 +2588,9 @@ if [[ "${base_product_device}" == "OnePlus9Pro" ]] ||[[ "${base_product_device}"
                 rm -rf build/portrom/images/my_product/app/OplusCamera
                 rm -rf build/portrom/images/my_product/product_overlay/framework/com.oplus.camera.*.jar
                 echo "ro.vendor.oplus.camera.isSupportLumo=1" >> build/portrom/images/my_product/etc/bruce/build.prop
-                unzip -o devices/${base_product_device}/camera5.0-fix_cos.zip -d build/portrom/images/
+                unzip -qo devices/${base_product_device}/camera5.0-fix_cos.zip -d build/portrom/images/
                 if ensure_resource_available "devices/${base_product_device}/camera5.0-fix_odm.zip"; then
-                    unzip -o devices/${base_product_device}/camera5.0-fix_odm.zip -d build/portrom/images/
+                    unzip -qo devices/${base_product_device}/camera5.0-fix_odm.zip -d build/portrom/images/
                 fi
             fi
         else
@@ -2598,7 +2598,7 @@ if [[ "${base_product_device}" == "OnePlus9Pro" ]] ||[[ "${base_product_device}"
             rm -rf build/portrom/images/my_product/app/OplusCamera
             rm -rf build/portrom/images/my_product/product_overlay/framework/com.oplus.camera.*.jar
             if ensure_resource_available "devices/${base_product_device}/live_photo_adds.zip"; then
-                unzip -o devices/${base_product_device}/live_photo_adds.zip -d build/portrom/images/
+                unzip -qo devices/${base_product_device}/live_photo_adds.zip -d build/portrom/images/
             fi
         fi
     elif  [[ "$portIsColorOSGlobal" == "true" ]];then
@@ -2607,9 +2607,9 @@ if [[ "${base_product_device}" == "OnePlus9Pro" ]] ||[[ "${base_product_device}"
             rm -rf build/portrom/images/my_product/app/OplusCamera
             rm -rf build/portrom/images/my_product/product_overlay/framework/com.oplus.camera.*.jar
             echo "ro.vendor.oplus.camera.isSupportLumo=1" >> build/portrom/images/my_product/etc/bruce/build.prop
-            unzip -o devices/${base_product_device}/camera5.0-fix_cos_global.zip -d build/portrom/images/
+            unzip -qo devices/${base_product_device}/camera5.0-fix_cos_global.zip -d build/portrom/images/
             if ensure_resource_available "devices/${base_product_device}/camera5.0-fix_odm.zip"; then
-                unzip -o devices/${base_product_device}/camera5.0-fix_odm.zip -d build/portrom/images/
+                unzip -qo devices/${base_product_device}/camera5.0-fix_odm.zip -d build/portrom/images/
             fi
         fi
 
@@ -2619,9 +2619,9 @@ if [[ "${base_product_device}" == "OnePlus9Pro" ]] ||[[ "${base_product_device}"
             rm -rf build/portrom/images/my_product/app/OplusCamera
             rm -rf build/portrom/images/my_product/product_overlay/framework/com.oplus.camera.*.jar
             echo "ro.vendor.oplus.camera.isSupportLumo=1" >> build/portrom/images/my_product/etc/bruce/build.prop
-            unzip -o devices/${base_product_device}/camera5.0-fix_oos.zip -d build/portrom/images/
+            unzip -qo devices/${base_product_device}/camera5.0-fix_oos.zip -d build/portrom/images/
             if ensure_resource_available "devices/${base_product_device}/camera5.0-fix_odm.zip"; then
-                unzip -o devices/${base_product_device}/camera5.0-fix_odm.zip -d build/portrom/images/
+                unzip -qo devices/${base_product_device}/camera5.0-fix_odm.zip -d build/portrom/images/
             fi
         fi
     fi
@@ -2659,15 +2659,15 @@ if [[ ${port_android_version} == 16 ]] && [[ ${base_android_version} -lt 15 ]];t
     #remove_feature "oplus.software.display.dcbacklight_support" force
 if ensure_resource_available "devices/common/nfc_fix_a16_v2.zip"; then
     rm -rf build/portrom/images/system/system/priv-app/NfcNci/*
-    unzip -o devices/common/nfc_fix_a16_v2.zip -d ${work_dir}/build/portrom/images/
+    unzip -qo devices/common/nfc_fix_a16_v2.zip -d ${work_dir}/build/portrom/images/
 fi
     if ensure_resource_available "devices/common/wifi_fix_a16.zip" && [[ $regionmark == "CN" ]];then
-    unzip -o devices/common/wifi_fix_a16.zip -d ${work_dir}/build/portrom/images/
+    unzip -qo devices/common/wifi_fix_a16.zip -d ${work_dir}/build/portrom/images/
     rm -rf build/portrom/images/system/system/apex/com.google.android.wifi*.apex
     fi
     if [[ ${port_oplusrom_version} == "16.0.1" ]] && [[ $regionmark != "CN" ]] ;then
         if ensure_resource_available "devices/common/oos_1601_fix.zip"; then
-            unzip -o devices/common/oos_1601_fix.zip -d build/portrom/images/
+            unzip -qo devices/common/oos_1601_fix.zip -d build/portrom/images/
         fi
     fi
 
@@ -2897,7 +2897,7 @@ if [[ ${port_android_version} == 17 ]];then
 fi
 
 if ensure_resource_available "devices/common/hdr_fix.zip" && [[ $base_android_version -le 14 ]];then
-    unzip -o devices/common/hdr_fix.zip -d build/portrom/images/
+    unzip -qo devices/common/hdr_fix.zip -d build/portrom/images/
     echo "persist.sys.feature.uhdr.support=true" >> build/portrom/images/my_product/etc/bruce/build.prop
 fi
 
@@ -2908,17 +2908,17 @@ fi
 #Devices/机型代码/overlay 按照镜像的目录结构，可直接替换目标。
 
 if [[ -d "devices/common/overlay" ]]; then
-    cp -rfv  devices/common/overlay/* build/portrom/images/
+    cp -rf  devices/common/overlay/* build/portrom/images/
 fi
 
 if [[ -d "devices/${base_product_device}/overlay" ]]; then
-    cp -rfv  devices/${base_product_device}/overlay/* build/portrom/images/
+    cp -rf  devices/${base_product_device}/overlay/* build/portrom/images/
 else
     yellow "devices/${base_product_device}/overlay 未找到" "devices/${base_product_device}/overlay not found" 
 fi
 
 if ensure_resource_available "devices/${base_product_device}/odm_selinux_fix_a16.zip" && [[ $port_android_version == 16 || $port_android_version == 17 ]]; then
-    unzip -o devices/${base_product_device}/odm_selinux_fix_a16.zip -d ${work_dir}/build/portrom/images/
+    unzip -qo devices/${base_product_device}/odm_selinux_fix_a16.zip -d ${work_dir}/build/portrom/images/
 fi
 
 anykernel_device_dir="${work_dir}/devices/${base_product_device}"
@@ -3193,35 +3193,35 @@ for img in $(find build/baserom/ -type f -name "vbmeta*.img");do
     python3 bin/patch-vbmeta.py ${img} > /dev/null 2>&1
 done
 if [[ -f devices/${base_product_device}/recovery.img ]]; then
-  cp -rfv devices/${base_product_device}/recovery.img build/baserom/images/
+  cp -rf devices/${base_product_device}/recovery.img build/baserom/images/
 fi
 
 if [[ -f devices/${base_product_device}/vendor_boot.img ]]; then
-  cp -rfv devices/${base_product_device}/vendor_boot.img build/baserom/images/
+  cp -rf devices/${base_product_device}/vendor_boot.img build/baserom/images/
 fi
 
 if [[ -f devices/${base_product_device}/abl.img ]]; then
-  cp -rfv devices/${base_product_device}/abl.img build/portrom/images/
+  cp -rf devices/${base_product_device}/abl.img build/portrom/images/
 fi
 
 if [[ -f devices/${base_product_device}/odm.img ]]; then
-  cp -rfv devices/${base_product_device}/odm.img build/portrom/images/
+  cp -rf devices/${base_product_device}/odm.img build/portrom/images/
 fi
 
 if [[ -f devices/${base_product_device}/tz.img ]]; then
-  cp -rfv devices/${base_product_device}/tz.img build/baserom/images/
+  cp -rf devices/${base_product_device}/tz.img build/baserom/images/
 fi
 
 if [[ -f devices/${base_product_device}/keymaster.img ]]; then
-  cp -rfv devices/${base_product_device}/keymaster.img build/baserom/images/
+  cp -rf devices/${base_product_device}/keymaster.img build/baserom/images/
 fi
 
 if [[ $is_ab_device == true ]]; then
     if [[ ! -f build/portrom/images/my_preload.img ]];then
-        cp -rfv devices/common/my_preload_empty.img build/portrom/images/my_preload.img
+        cp -rf devices/common/my_preload_empty.img build/portrom/images/my_preload.img
     fi
     if [[ ! -f build/portrom/images/my_company.img ]];then
-        cp -rfv devices/common/my_company_empty.img build/portrom/images/my_company.img
+        cp -rf devices/common/my_company_empty.img build/portrom/images/my_company.img
     fi
 elif [[ $is_ab_device == false ]];then
     rm -rf build/portrom/images/my_company.img
@@ -3236,7 +3236,7 @@ if [[ $pack_method == "stock" ]];then
     for part in SYSTEM SYSTEM_EXT PRODUCT VENDOR MY_MANIFEST; do
         mkdir -p out/target/product/${base_product_device}/$part
     done
-    mv -fv build/portrom/images/*.img out/target/product/${base_product_device}/IMAGES/
+    mv -f build/portrom/images/*.img out/target/product/${base_product_device}/IMAGES/
     if [[ -d build/baserom/firmware-update ]];then
         bootimg=$(find build/baserom/ -name "boot.img")
         cp -rf $bootimg out/target/product/${base_product_device}/IMAGES/
@@ -3244,7 +3244,7 @@ if [[ $pack_method == "stock" ]];then
         if [[ -f build/baserom/images/init_boot-kernelsu.img ]];then
             mv build/baserom/images/init_boot-kernelsu.img build/baserom/images/init_boot.img
         fi
-        mv -fv build/baserom/images/*.img out/target/product/${base_product_device}/IMAGES/
+        mv -f build/baserom/images/*.img out/target/product/${base_product_device}/IMAGES/
     fi
 
     if [[ -d devices/${base_product_device} ]];then
@@ -3252,8 +3252,8 @@ if [[ $pack_method == "stock" ]];then
         ksu_bootimg_file=$(find devices/$base_product_device/ -type f -name "*boot_ksu.img")
         dtbo_file=$(find devices/$base_product_device/ -type f -name "*dtbo_ksu.img")
         if [ -n "$ksu_bootimg_file" ];then
-            mv -fv $ksu_bootimg_file out/target/product/${base_product_device}/IMAGES/boot.img
-            mv -fv $dtbo_file out/target/product/${base_product_device}/IMAGES/dtbo.img
+            mv -f $ksu_bootimg_file out/target/product/${base_product_device}/IMAGES/boot.img
+            mv -f $dtbo_file out/target/product/${base_product_device}/IMAGES/dtbo.img
         else
             spoof_bootimg out/target/product/${base_product_device}/IMAGES/boot.img
         fi
@@ -3489,7 +3489,7 @@ else
         mv -f build/baserom/images/*.img out/${os_type}_${rom_version}/firmware-update
         for fwimg in $(ls out/${os_type}_${rom_version}/firmware-update |cut -d "." -f 1 |grep -vE "super|cust|preloader");do
             if [[ $fwimg == *"xbl"* ]] || [[ $fwimg == *"dtbo"* ]] || [[ $fwimg == *"reserve"* ]] || [[ $fwimg == *"boot"* ]];then
-                rm -rfv out/${os_type}_${rom_version}/firmware-update/*reserve*
+                rm -rf out/${os_type}_${rom_version}/firmware-update/*reserve*
                 # Warning: If wrong xbl img has been flashed, it will cause phone hard brick, so we just skip it with fastboot mode.
                 continue
             elif [[ $fwimg == "mdm_oem_stanvbk" ]] || [[ $fwimg == "spunvm" ]] ;then
