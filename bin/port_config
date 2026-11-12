@@ -18,7 +18,9 @@ super_extended=false
 
 pack_with_dsu=false
 
-pack_method=stock
+# 打包方式: ota (默认，生成带 payload.bin 的 Recovery OTA 刷机包) 或 fastboot (生成带 super.zst 和 fastboot 刷机脚本的线刷包)
+# Packaging method: ota (default, recovery package with payload.bin) or fastboot (fastboot flashable package with super.zst and flash scripts)
+pack_method=ota
 
 #ddr_type=ddr5
 

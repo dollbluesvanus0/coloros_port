@@ -107,7 +107,18 @@ super_list="$(port_config_get possible_super_list 'system system_ext vendor prod
 repackext4="$(port_config_get repack_with_ext4 false)"
 super_extended="$(port_config_get super_extended false)"
 pack_with_dsu="$(port_config_get pack_with_dsu false)"
-pack_method="$(port_config_get pack_method stock)"
+pack_method="${PACK_METHOD:-$(port_config_get pack_method stock)}"
+_norm_pack_method="$(printf '%s' "${pack_method}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${_norm_pack_method}" == "fastboot" ]]; then
+    pack_method="fastboot"
+    green "打包方式: Fastboot 线刷包" "Package format: Fastboot flashable package"
+elif [[ "${_norm_pack_method}" == "ota" || "${_norm_pack_method}" == "stock" ]]; then
+    pack_method="stock"
+    green "打包方式: OTA 升级包 (payload.bin)" "Package format: OTA update package (payload.bin)"
+else
+    error "pack_method 必须为 ota 或 fastboot" "pack_method must be ota or fastboot"
+    exit 2
+fi
 ddr_type="$(port_config_get ddr_type '')"
 reusabe_partition_list="$(port_config_get reusabe_partition_list '')"
 remove_data_encryption="$(port_config_get remove_data_encryption false)"
@@ -1048,8 +1059,8 @@ if [[ -f build/${app_patch_folder}/patched/framework.jar ]];then
     cp -rfv build/${app_patch_folder}/patched/framework.jar build/portrom/images/system/system/framework/framework.jar
 else
     cp -rf build/portrom/images/system/system/framework/framework.jar tmp/framework.jar
+    java -jar bin/apktool/APKEditor.jar d -f -i tmp/framework.jar -o tmp/framework -no-dex-debug
     if [[ -f devices/common/0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch ]]; then
-        java -jar bin/apktool/APKEditor.jar d -f -i tmp/framework.jar -o tmp/framework -no-dex-debug
         pushd tmp/framework 
         [[ -d .git ]] && rm -rf .git  
         git init
@@ -1061,11 +1072,11 @@ else
         git apply ${work_dir}/devices/common/0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch && echo "✅ Patch 应用成功" || echo "❌ Patch 应用失败"
 
         popd
-        java -jar bin/apktool/APKEditor.jar b -f -i tmp/framework -o build/${app_patch_folder}/patched/framework.jar 
-        cp -rfv build/${app_patch_folder}/patched/framework.jar build/portrom/images/system/system/framework/framework.jar
-    else
-        echo "⚠️ 0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch不存在，跳过补丁应用"
     fi
+    blue "应用 APK Protection 补丁到 framework.jar" "Applying APK Protection patch to framework.jar"
+    python3 bin/patch_apk_protection.py tmp/framework || exit 1
+    java -jar bin/apktool/APKEditor.jar b -f -i tmp/framework -o build/${app_patch_folder}/patched/framework.jar
+    cp -rfv build/${app_patch_folder}/patched/framework.jar build/portrom/images/system/system/framework/framework.jar
 fi
 
 
@@ -1448,7 +1459,7 @@ if [[ -f build/${app_patch_folder}/patched/SystemUI.apk ]]; then
 elif [[ -f "$targetSystemUI" ]]; then
     
     cp -rf $targetSystemUI tmp/$(basename $targetSystemUI).bak
-    apk_decode "${targetSystemUI}" tmp/SystemUI --backend apktool --artifact SystemUI.apk -r ${extra_args:-} || exit 1
+    apk_decode "${targetSystemUI}" tmp/SystemUI --artifact SystemUI.apk ${extra_args:-} || exit 1
     blue "解锁全景全屏AOD"
     targetSmoothTransitionControllerSmali=$(find tmp/SystemUI -type f -name "SmoothTransitionController.smali" -print -quit)
     if [[ -n "${targetSmoothTransitionControllerSmali}" ]]; then
@@ -1474,17 +1485,13 @@ elif [[ -f "$targetSystemUI" ]]; then
             python3 bin/patchmethod_v2.py "${targetSmali}" isSupportMyDevice || exit 1
         fi
     fi
-
-    # Fix keyguard_settings_popup_menu crash by nop'ing addViews in DefaultSettingsPopupMenuSection
-    targetPopupMenuSectionSmali=$(find tmp/SystemUI -type f -name "DefaultSettingsPopupMenuSection.smali" -print -quit)
-    if [[ -n "${targetPopupMenuSectionSmali}" ]]; then
-        blue "修复锁屏设置弹出菜单崩溃 (DefaultSettingsPopupMenuSection.addViews)" "Fix keyguard popup menu crash"
-        python3 bin/patchmethod_v2.py "${targetPopupMenuSectionSmali}" addViews -return void || exit 1
-    fi
-
+    # tmp workround 
+    for style_xml_file in $(find tmp/SystemUI -name "styles.xml");do 
+        sed -i "s/style\/null/7f1403f6/g" $style_xml_file
+    done
     mkdir -p "build/${app_patch_folder}/patched"
     apk_build tmp/SystemUI "build/${app_patch_folder}/patched/SystemUI.apk" \
-        --backend apktool --artifact SystemUI.apk --copy-original ${extra_args:-} || exit 1
+        --artifact SystemUI.apk ${extra_args:-} || exit 1
     cp -p -- "build/${app_patch_folder}/patched/SystemUI.apk" "${targetSystemUI}" || exit 1
 fi
 
@@ -3277,13 +3284,20 @@ else
         error "无法打包 super.img"  "Unable to pack super.img."
         exit 1
     fi
-    #for pname in ${super_list};do
-    #    rm -rf build/portrom/images/${pname}.img
-    #done
-
+    if [[ "${PORT_LOW_DISK:-false}" == true ]]; then
+        for pname in ${super_list};do
+            rm -f "build/portrom/images/${pname}.img"
+        done
+        df -h .
+    fi
 
     blue "正在压缩 super.img" "Comprising super.img"
     zstd -T0 build/portrom/images/super.img -o build/portrom/super.zst || exit 1
+    if [[ "${PORT_LOW_DISK:-false}" == true ]]; then
+        rm -f build/portrom/images/super.img
+        rm -rf tmp build/baserom
+        df -h .
+    fi
 
     blue "正在生成刷机脚本" "Generating flashing script"
 
