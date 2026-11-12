@@ -3,3 +3,5 @@ tmp/
 build/
 __pycache__/
 *.py[cod]
+tools-rust/target/
+

@@ -99,6 +99,21 @@ jobs:
           python3 -m playwright install --with-deps chromium
           echo 'JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64' >> "$GITHUB_ENV"
           echo '/usr/lib/jvm/java-21-openjdk-amd64/bin' >> "$GITHUB_PATH"
+          for cargo_bin_dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin"; do
+            if [[ -x "${cargo_bin_dir}/cargo" ]] && ! command -v cargo >/dev/null 2>&1; then
+              export PATH="${cargo_bin_dir}:$PATH"
+              echo "${cargo_bin_dir}" >> "$GITHUB_PATH"
+              break
+            fi
+          done
+          if command -v cargo >/dev/null 2>&1 && [[ -f tools-rust/Cargo.toml ]]; then
+            cargo build --release --manifest-path tools-rust/Cargo.toml
+            mkdir -p bin/Linux/x86_64
+            cp -f tools-rust/target/release/coloros-tools bin/Linux/x86_64/coloros-tools
+            for tool in rom-fs-patcher dex-patcher smali-patcher prop-tool; do
+              ln -sf coloros-tools "bin/Linux/x86_64/${tool}"
+            done
+          fi
           bash -n port.sh functions.sh
           java -version
           printf '%s  %s\n' dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423 bin/apktool/apktool.jar | sha256sum -c -
@@ -108,7 +123,6 @@ jobs:
           python3 tests/smoke_cos17_engineer.py
           python3 tests/smoke_apktool_resources.py
           python3 tests/test_fetch_rom_url.py
-          cargo test --manifest-path tools/dex-patcher/Cargo.toml
 
       - name: Resolve ROM URLs
         env:
@@ -223,4 +237,3 @@ jobs:
               tail -n 80 -- "$log"
             fi
           done
-

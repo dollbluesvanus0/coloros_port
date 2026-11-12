@@ -1,0 +1,24 @@
+[package]
+name = "rom-fs-patcher"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Stage 1: SELinux file_contexts and fs_config patcher replacing contextpatch.py and fspatch.py"
+
+[[bin]]
+name = "rom-fs-patcher"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+coloros-common.workspace = true
+jwalk.workspace = true
+rayon.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -25,7 +25,187 @@ PRELOADS_SHAREDUIDS='.locals 1
 # Keep the helper under the remote repository's existing bin/ tree.  The
 # refactored worktree used utils/smalikit.py, but adding a new top-level utils/
 # directory would change the online repository layout.
-smali_kit="python3 bin/smalikit.py"
+# When the Rust toolset (coloros-tools / smali-patcher) is available, prefer it
+# with automatic fallback to the legacy Python scripts.
+_port::resolve_rust_bin() {
+    local bin_name="$1"
+    local root="${work_dir:-${PORT_PROJECT_ROOT:-$(pwd)}}"
+    local sys_arch
+    sys_arch="$(uname -m 2>/dev/null || echo x86_64)"
+    [[ "${sys_arch}" == "arm64" ]] && sys_arch="aarch64"
+    local sys_os
+    sys_os="$(uname -s 2>/dev/null || echo Linux)"
+    local candidate
+    for candidate in \
+        "${tools_dir:-}/${bin_name}" \
+        "${root}/bin/${sys_os}/${sys_arch}/${bin_name}" \
+        "${root}/bin/${bin_name}" \
+        "${root}/tools-rust/target/release/${bin_name}" \
+        "${root}/tools-rust/target/release/${bin_name}.exe"; do
+        if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    if command -v "${bin_name}" >/dev/null 2>&1; then
+        command -v "${bin_name}"
+        return 0
+    fi
+    return 1
+}
+
+run_smali_kit() {
+    local bin=""
+    if bin="$(_port::resolve_rust_bin smali-patcher)"; then
+        "${bin}" smalikit "$@"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" smali-patcher smalikit "$@"
+    else
+        python3 bin/smalikit.py "$@"
+    fi
+}
+
+run_patchmethod_v2() {
+    local bin=""
+    if bin="$(_port::resolve_rust_bin smali-patcher)"; then
+        "${bin}" patchmethod_v2 "$@"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" smali-patcher patchmethod_v2 "$@"
+    else
+        python3 bin/patchmethod_v2.py "$@"
+    fi
+}
+
+run_patchmethod() {
+    local bin=""
+    if bin="$(_port::resolve_rust_bin smali-patcher)"; then
+        "${bin}" patchmethod "$@"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" smali-patcher patchmethod "$@"
+    else
+        python3 bin/patchmethod.py "$@"
+    fi
+}
+
+run_dex_patcher() {
+    if [[ "${PORT_DISABLE_DEX_PATCHER:-false}" == "true" ]]; then
+        return 127
+    fi
+    local bin=""
+    if bin="$(_port::resolve_rust_bin dex-patcher)"; then
+        "${bin}" "$@"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" dex-patcher "$@"
+    else
+        return 127
+    fi
+}
+
+run_patch_apk_protection() {
+    local target="$1"
+    local bin=""
+    if [[ -f "${target}" ]] && { [[ "${target}" == *.jar ]] || [[ "${target}" == *.apk ]] || [[ "${target}" == *.dex ]]; }; then
+        if bin="$(_port::resolve_rust_bin dex-patcher)"; then
+            "${bin}" patch-apk-protection --file "${target}"
+            return $?
+        elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+            "${bin}" dex-patcher patch-apk-protection --file "${target}"
+            return $?
+        fi
+    fi
+    if bin="$(_port::resolve_rust_bin smali-patcher)"; then
+        "${bin}" apk-protection "${target}"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" smali-patcher apk-protection "${target}"
+    else
+        python3 bin/patch_apk_protection.py "${target}"
+    fi
+}
+
+run_patch_cos17_engineer() {
+    local target="$1"
+    local bin=""
+    if [[ -f "${target}" ]] && { [[ "${target}" == *.jar ]] || [[ "${target}" == *.apk ]] || [[ "${target}" == *.dex ]]; }; then
+        if bin="$(_port::resolve_rust_bin dex-patcher)"; then
+            "${bin}" stub-method --file "${target}" --class OplusEngineerFwService --method "onBootPhase(I)V" --return-void
+            return $?
+        elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+            "${bin}" dex-patcher stub-method --file "${target}" --class OplusEngineerFwService --method "onBootPhase(I)V" --return-void
+            return $?
+        fi
+    fi
+    if bin="$(_port::resolve_rust_bin smali-patcher)"; then
+        "${bin}" cos17-engineer "${target}"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" smali-patcher cos17-engineer "${target}"
+    else
+        python3 bin/patch_cos17_engineer.py "${target}"
+    fi
+}
+
+run_patch_inspiration_aod_gate() {
+    local target="$1"
+    local bin=""
+    if [[ -f "${target}" ]] && { [[ "${target}" == *.jar ]] || [[ "${target}" == *.apk ]] || [[ "${target}" == *.dex ]]; }; then
+        if bin="$(_port::resolve_rust_bin dex-patcher)"; then
+            "${bin}" patch-inspiration-aod-gate --file "${target}"
+            return $?
+        elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+            "${bin}" dex-patcher patch-inspiration-aod-gate --file "${target}"
+            return $?
+        fi
+    fi
+    if bin="$(_port::resolve_rust_bin smali-patcher)"; then
+        "${bin}" inspiration-aod-gate "${target}"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" smali-patcher inspiration-aod-gate "${target}"
+    else
+        python3 bin/patch_inspiration_aod_gate.py "${target}"
+    fi
+}
+
+run_fs_and_context_patch() {
+    local part_dir="$1"
+    local fs_cfg="$2"
+    local file_ctx="$3"
+    local bin=""
+    if bin="$(_port::resolve_rust_bin rom-fs-patcher)"; then
+        "${bin}" patch-all "${part_dir}" "${fs_cfg}" "${file_ctx}"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" fs-patcher patch-all "${part_dir}" "${fs_cfg}" "${file_ctx}"
+    else
+        python3 bin/fspatch.py "${part_dir}" "${fs_cfg}" && \
+        python3 bin/contextpatch.py "${part_dir}" "${file_ctx}"
+    fi
+}
+
+run_fspatch() {
+    local part_dir="$1"
+    local fs_cfg="$2"
+    local bin=""
+    if bin="$(_port::resolve_rust_bin rom-fs-patcher)"; then
+        "${bin}" fs-patch "${part_dir}" "${fs_cfg}"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" fs-patcher fs-patch "${part_dir}" "${fs_cfg}"
+    else
+        python3 bin/fspatch.py "${part_dir}" "${fs_cfg}"
+    fi
+}
+
+run_contextpatch() {
+    local part_dir="$1"
+    local file_ctx="$2"
+    local bin=""
+    if bin="$(_port::resolve_rust_bin rom-fs-patcher)"; then
+        "${bin}" context-patch "${part_dir}" "${file_ctx}"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" fs-patcher context-patch "${part_dir}" "${file_ctx}"
+    else
+        python3 bin/contextpatch.py "${part_dir}" "${file_ctx}"
+    fi
+}
+
+smali_kit="run_smali_kit"
 
 _port::lower() {
     printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
@@ -491,15 +671,28 @@ disable_avb_verify() {
         sleep 5
     else
         blue "禁用 AVB 验证中..." "Disabling AVB verfication...."
-        for file in $fstab; do
-            sed -i 's/,avb.*system//g' $file
-            sed -i 's/,avb,/,/g' $file
-            sed -i 's/,avb=.*a,/,/g' $file
-            sed -i 's/,avb_keys.*key//g' $file
-            if [[ "${pack_type}" == "EXT" ]];then
-                sed -i "/erofs/d" $file
-            fi
-        done
+        local prop_bin=""
+        if prop_bin="$(_port::resolve_rust_bin prop-tool)" || prop_bin="$(_port::resolve_rust_bin coloros-tools)"; then
+            local extra_flags=(--disable-avb)
+            [[ "${pack_type}" == "EXT" ]] && extra_flags+=(--remove-erofs)
+            for file in $fstab; do
+                if [[ "${prop_bin}" == *coloros-tools* ]]; then
+                    "${prop_bin}" prop-tool clean-fstab --fstab "$file" "${extra_flags[@]}"
+                else
+                    "${prop_bin}" clean-fstab --fstab "$file" "${extra_flags[@]}"
+                fi
+            done
+        else
+            for file in $fstab; do
+                sed -i 's/,avb.*system//g' $file
+                sed -i 's/,avb,/,/g' $file
+                sed -i 's/,avb=.*a,/,/g' $file
+                sed -i 's/,avb_keys.*key//g' $file
+                if [[ "${pack_type}" == "EXT" ]];then
+                    sed -i "/erofs/d" $file
+                fi
+            done
+        fi
         blue "AVB 验证禁用完成" "AVB verification disabled successfully"
     fi
 }
@@ -843,6 +1036,15 @@ add_prop_v2(){
     bruce_prop="${work_dir}/build/portrom/images/my_product/etc/bruce/build.prop"
     portrom_prop="${work_dir}/build/portrom/images/my_product/build.prop"
 
+    local prop_bin=""
+    if prop_bin="$(_port::resolve_rust_bin prop-tool)"; then
+        "${prop_bin}" batch --file "$portrom_prop" --bruce-file "$bruce_prop" --set "${prop}=${value}"
+        return $?
+    elif prop_bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${prop_bin}" prop-tool batch --file "$portrom_prop" --bruce-file "$bruce_prop" --set "${prop}=${value}"
+        return $?
+    fi
+
     # Add to bruce_prop only when neither file has the prop; the key-exists
     # check keeps a resumed run from appending duplicate lines.
     if ! grep -q "^${prop}=" "$bruce_prop" && ! grep -q "^${prop}=" "$portrom_prop"; then
@@ -867,6 +1069,23 @@ add_prop_v2(){
 remove_prop_v2() {
     prop="${1}"
     force="${2}"
+    local bruce_prop="${work_dir}/build/portrom/images/my_product/etc/bruce/build.prop"
+    local portrom_prop="${work_dir}/build/portrom/images/my_product/build.prop"
+    local base_prop="${work_dir}/build/baserom/images/my_product/build.prop"
+
+    local prop_bin=""
+    if prop_bin="$(_port::resolve_rust_bin prop-tool)"; then
+        local force_args=(--base "$base_prop")
+        [[ -n "${force}" ]] && force_args+=(--force)
+        "${prop_bin}" batch --file "$portrom_prop" --bruce-file "$bruce_prop" --comment "${prop}" "${force_args[@]}"
+        return $?
+    elif prop_bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        local force_args=(--base "$base_prop")
+        [[ -n "${force}" ]] && force_args+=(--force)
+        "${prop_bin}" prop-tool batch --file "$portrom_prop" --bruce-file "$bruce_prop" --comment "${prop}" "${force_args[@]}"
+        return $?
+    fi
+
     escaped_prop=$(echo "${prop}" | sed 's/\./\\./g')
 
     if [[ -n ${force} ]]; then
@@ -915,7 +1134,17 @@ prepare_base_prop() {
 add_prop_from_port() {
     base_build_prop="${work_dir}/build/baserom/images/my_product/build.prop"
     old_portrom_prop="${work_dir}/tmp/build.prop.portrom.bak"
+    target_build_prop="${work_dir}/build/portrom/images/my_product/build.prop"
     bruce_prop="${work_dir}/build/portrom/images/my_product/etc/bruce/build.prop"
+
+    local prop_bin=""
+    if prop_bin="$(_port::resolve_rust_bin prop-tool)"; then
+        "${prop_bin}" merge --base "$base_build_prop" --port "$old_portrom_prop" --output "$target_build_prop" --bruce-output "$bruce_prop"
+        return $?
+    elif prop_bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${prop_bin}" prop-tool merge --base "$base_build_prop" --port "$old_portrom_prop" --output "$target_build_prop" --bruce-output "$bruce_prop"
+        return $?
+    fi
 
     # Properties that are always forced through.
     force_keys=(

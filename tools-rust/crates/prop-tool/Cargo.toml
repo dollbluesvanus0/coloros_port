@@ -1,0 +1,22 @@
+[package]
+name = "prop-tool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Stage 4: Batch build.prop and fstab processor"
+
+[[bin]]
+name = "prop-tool"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+coloros-common.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
