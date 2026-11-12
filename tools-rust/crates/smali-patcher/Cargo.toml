@@ -1,0 +1,25 @@
+[package]
+name = "smali-patcher"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Stage 3: Parallel Regex Engine for Smali replacing patchmethod_v2.py and smalikit.py"
+
+[[bin]]
+name = "smali-patcher"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+coloros-common.workspace = true
+jwalk.workspace = true
+memmap2.workspace = true
+rayon.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

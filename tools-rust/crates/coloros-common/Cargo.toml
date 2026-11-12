@@ -1,0 +1,12 @@
+[package]
+name = "coloros-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Common types, error handling, logging, and file utilities for coloros-tools"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true

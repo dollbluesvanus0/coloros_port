@@ -976,11 +976,7 @@ if [[ -f build/${app_patch_folder}/patched/services.jar ]];then
     blue "复制已经处理过的services.jar"
     cp -rfv build/${app_patch_folder}/patched/services.jar build/portrom/images/system/system/framework/services.jar
 elif [[ -f build/portrom/images/system/system/framework/services.jar ]];then 
-    if [[ ! -d tmp ]];then
-        mkdir -p tmp/
-    fi
-
-    mkdir -p tmp/services/
+    mkdir -p tmp "build/${app_patch_folder}/patched"
     cp -rf build/portrom/images/system/system/framework/services.jar tmp/services.jar
     framework_res=$(find build/portrom/images/ -type f -name "framework-res.apk")
     extra_args=""
@@ -989,68 +985,79 @@ elif [[ -f build/portrom/images/system/system/framework/services.jar ]];then
         extra_args="-framework $framework_res"
     fi
 
-    java -jar bin/apktool/APKEditor.jar d -f -i tmp/services.jar -o tmp/services
+    if run_dex_patcher patch-services --file tmp/services.jar \
+        --output "build/${app_patch_folder}/patched/services.jar.new.jar" --require; then
+        blue "使用 dex-patcher 直接修补 services.jar" "Patched services.jar via dex-patcher"
+        mv -f -- "build/${app_patch_folder}/patched/services.jar.new.jar" \
+            "build/${app_patch_folder}/patched/services.jar" || exit 1
+        cp -rfv "build/${app_patch_folder}/patched/services.jar" \
+            build/portrom/images/system/system/framework/services.jar || exit 1
+    else
+        rm -f -- "build/${app_patch_folder}/patched/services.jar.new.jar"
+        mkdir -p tmp/services/
+        java -jar bin/apktool/APKEditor.jar d -f -i tmp/services.jar -o tmp/services
 
 
-    smalis=("ScanPackageUtils")
-    methods=("--assertMinSignatureSchemeIsValid")
+        smalis=("ScanPackageUtils")
+        methods=("--assertMinSignatureSchemeIsValid")
 
-    for (( i=0; i<${#smalis[@]}; i++ )); do
-        smali="${smalis[i]}"
-        method="${methods[i]}"
-        
-        target_file=$(find tmp/services -type f -name "${smali}.smali")
-        echo "smali is $smali"
-        echo "target_file is $target_file"
-        
-        if [[ -f $target_file ]]; then
-            for single_method in $method; do
-                python3 bin/patchmethod.py $target_file $single_method && echo "${target_file} patched successfully"
-            done
-        fi
-    done
+        for (( i=0; i<${#smalis[@]}; i++ )); do
+            smali="${smalis[i]}"
+            method="${methods[i]}"
+            
+            target_file=$(find tmp/services -type f -name "${smali}.smali")
+            echo "smali is $smali"
+            echo "target_file is $target_file"
+            
+            if [[ -f $target_file ]]; then
+                for single_method in $method; do
+                    run_patchmethod $target_file $single_method && echo "${target_file} patched successfully"
+                done
+            fi
+        done
 
-    target_method='getMinimumSignatureSchemeVersionForTargetSdk' 
-    old_smali_dir=""
-    declare -a smali_dirs
+        target_method='getMinimumSignatureSchemeVersionForTargetSdk' 
+        old_smali_dir=""
+        declare -a smali_dirs
 
-    while read -r smali_file; do
-        smali_dir=$(echo "$smali_file" | cut -d "/" -f 3)
+        while read -r smali_file; do
+            smali_dir=$(echo "$smali_file" | cut -d "/" -f 3)
 
-        if [[ $smali_dir != $old_smali_dir ]]; then
-            smali_dirs+=("$smali_dir")
-        fi
+            if [[ $smali_dir != $old_smali_dir ]]; then
+                smali_dirs+=("$smali_dir")
+            fi
 
-        method_line=$(grep -n "$target_method" "$smali_file" | cut -d ':' -f 1)
-        register_number=$(tail -n +"$method_line" "$smali_file" | grep -m 1 "move-result" | tr -dc '0-9')
-        move_result_end_line=$(awk -v ML=$method_line 'NR>=ML && /move-result /{print NR; exit}' "$smali_file")
-        orginal_line_number=$method_line
-        replace_with_command="const/4 v${register_number}, 0x0"
-        { sed -i "${orginal_line_number},${move_result_end_line}d" "$smali_file" && sed -i "${orginal_line_number}i\\${replace_with_command}" "$smali_file"; } && blue "${smali_file}  修改成功" "${smali_file} patched"
-        old_smali_dir=$smali_dir
-    done < <(find tmp/services/smali/*/com/android/server/pm/ tmp/services/smali/*/com/android/server/pm/pkg/parsing/ -maxdepth 1 -type f -name "*.smali" -exec grep -H "$target_method" {} \; | cut -d ':' -f 1)
+            method_line=$(grep -n "$target_method" "$smali_file" | cut -d ':' -f 1)
+            register_number=$(tail -n +"$method_line" "$smali_file" | grep -m 1 "move-result" | tr -dc '0-9')
+            move_result_end_line=$(awk -v ML=$method_line 'NR>=ML && /move-result /{print NR; exit}' "$smali_file")
+            orginal_line_number=$method_line
+            replace_with_command="const/4 v${register_number}, 0x0"
+            { sed -i "${orginal_line_number},${move_result_end_line}d" "$smali_file" && sed -i "${orginal_line_number}i\\${replace_with_command}" "$smali_file"; } && blue "${smali_file}  修改成功" "${smali_file} patched"
+            old_smali_dir=$smali_dir
+        done < <(find tmp/services/smali/*/com/android/server/pm/ tmp/services/smali/*/com/android/server/pm/pkg/parsing/ -maxdepth 1 -type f -name "*.smali" -exec grep -H "$target_method" {} \; | cut -d ':' -f 1)
 
-    ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS='ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS' 
+        ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS='ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS' 
 
-    find tmp/services/ -type f -name "ReconcilePackageUtils.smali" | while read smali_file; do
-        match_line=$(grep -n "sput-boolean .*${ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS}" "$smali_file" | head -n 1)
+        find tmp/services/ -type f -name "ReconcilePackageUtils.smali" | while read smali_file; do
+            match_line=$(grep -n "sput-boolean .*${ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS}" "$smali_file" | head -n 1)
 
-        if [[ -n "$match_line" ]]; then
-            line_number=$(echo "$match_line" | cut -d ':' -f 1)
-            reg=$(echo "$match_line" | sed -n 's/.*sput-boolean \([^,]*\),.*/\1/p')
+            if [[ -n "$match_line" ]]; then
+                line_number=$(echo "$match_line" | cut -d ':' -f 1)
+                reg=$(echo "$match_line" | sed -n 's/.*sput-boolean \([^,]*\),.*/\1/p')
 
-            echo "Found in $smali_file at line $line_number using register $reg"
+                echo "Found in $smali_file at line $line_number using register $reg"
 
-            # 在该行前插入 const/4 vX, 0x1
-            sed -i "${line_number}i\    const/4 $reg, 0x1" "$smali_file"
-            echo "→ Patched successfully in $smali_file"
-        else
-            echo "× Not found in $smali_file"
-        fi
-    done
+                # 在该行前插入 const/4 vX, 0x1
+                sed -i "${line_number}i\    const/4 $reg, 0x1" "$smali_file"
+                echo "→ Patched successfully in $smali_file"
+            else
+                echo "× Not found in $smali_file"
+            fi
+        done
 
-    java -jar bin/apktool/APKEditor.jar b -f -i tmp/services -o build/${app_patch_folder}/patched/services.jar 
-    cp -rfv build/${app_patch_folder}/patched/services.jar build/portrom/images/system/system/framework/services.jar
+        java -jar bin/apktool/APKEditor.jar b -f -i tmp/services -o build/${app_patch_folder}/patched/services.jar 
+        cp -rfv build/${app_patch_folder}/patched/services.jar build/portrom/images/system/system/framework/services.jar
+    fi
 
 fi
 
@@ -1058,25 +1065,37 @@ if [[ -f build/${app_patch_folder}/patched/framework.jar ]];then
     blue "复制已经处理过的framework.jar"
     cp -rfv build/${app_patch_folder}/patched/framework.jar build/portrom/images/system/system/framework/framework.jar
 else
+    mkdir -p tmp "build/${app_patch_folder}/patched"
     cp -rf build/portrom/images/system/system/framework/framework.jar tmp/framework.jar
-    java -jar bin/apktool/APKEditor.jar d -f -i tmp/framework.jar -o tmp/framework -no-dex-debug
-    if [[ -f devices/common/0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch ]]; then
-        pushd tmp/framework 
-        [[ -d .git ]] && rm -rf .git  
-        git init
-        git config user.name "patchuser"
-        git config user.email "patchuser@example.com"
-        git add . > /dev/null 2>&1
-        git commit -m "Initial smali source" > /dev/null 2>&1
-        echo "🔧 应用 patch 文件 0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch ..."
-        git apply ${work_dir}/devices/common/0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch && echo "✅ Patch 应用成功" || echo "❌ Patch 应用失败"
+    if [[ ! -f devices/common/0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch ]] && \
+       run_dex_patcher patch-apk-protection --file tmp/framework.jar \
+           --output "build/${app_patch_folder}/patched/framework.jar.new.jar" --require; then
+        blue "应用 APK Protection 补丁到 framework.jar (dex-patcher)" "Applying APK Protection patch to framework.jar (dex-patcher)"
+        mv -f -- "build/${app_patch_folder}/patched/framework.jar.new.jar" \
+            "build/${app_patch_folder}/patched/framework.jar" || exit 1
+        cp -rfv "build/${app_patch_folder}/patched/framework.jar" \
+            build/portrom/images/system/system/framework/framework.jar || exit 1
+    else
+        rm -f -- "build/${app_patch_folder}/patched/framework.jar.new.jar"
+        java -jar bin/apktool/APKEditor.jar d -f -i tmp/framework.jar -o tmp/framework -no-dex-debug
+        if [[ -f devices/common/0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch ]]; then
+            pushd tmp/framework 
+            [[ -d .git ]] && rm -rf .git  
+            git init
+            git config user.name "patchuser"
+            git config user.email "patchuser@example.com"
+            git add . > /dev/null 2>&1
+            git commit -m "Initial smali source" > /dev/null 2>&1
+            echo "🔧 应用 patch 文件 0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch ..."
+            git apply ${work_dir}/devices/common/0001-core-framework-Introduce-OplusPropsHookUtils-V6.patch && echo "✅ Patch 应用成功" || echo "❌ Patch 应用失败"
 
-        popd
+            popd
+        fi
+        blue "应用 APK Protection 补丁到 framework.jar" "Applying APK Protection patch to framework.jar"
+        run_patch_apk_protection tmp/framework || exit 1
+        java -jar bin/apktool/APKEditor.jar b -f -i tmp/framework -o build/${app_patch_folder}/patched/framework.jar
+        cp -rfv build/${app_patch_folder}/patched/framework.jar build/portrom/images/system/system/framework/framework.jar
     fi
-    blue "应用 APK Protection 补丁到 framework.jar" "Applying APK Protection patch to framework.jar"
-    python3 bin/patch_apk_protection.py tmp/framework || exit 1
-    java -jar bin/apktool/APKEditor.jar b -f -i tmp/framework -o build/${app_patch_folder}/patched/framework.jar
-    cp -rfv build/${app_patch_folder}/patched/framework.jar build/portrom/images/system/system/framework/framework.jar
 fi
 
 
@@ -1094,20 +1113,32 @@ if [[ -f "${oplus_service_cache}" ]]; then
     cp -p -- "${oplus_service_cache}" "${targetOplusService}" || exit 1
 elif [[ -f "${targetOplusService}" ]]; then
     blue "Removing GSM Restriction"
+    mkdir -p tmp "$(dirname "${oplus_service_cache}")"
     cp -p -- "${targetOplusService}" "tmp/$(basename "${targetOplusService}").bak" || exit 1
-    java -jar bin/apktool/APKEditor.jar d -f -i "${targetOplusService}" -o tmp/OplusService || exit 1
-    targetSmali=$(find tmp/OplusService -type f -name "OplusBgSceneManager.smali" -print -quit)
-    if [[ -n "${targetSmali}" ]]; then
-        python3 bin/patchmethod.py "${targetSmali}" "-isGmsRestricted" || exit 1
-    fi
+    dex_batch_args=(--stub "OplusBgSceneManager::isGmsRestricted=false")
     if [[ "${port_android_version}" == 17 ]]; then
-        python3 bin/patch_cos17_engineer.py tmp/OplusService || exit 1
+        dex_batch_args+=(--require-stub "OplusEngineerFwService::onBootPhase(I)V=void")
     fi
-    mkdir -p "$(dirname "${oplus_service_cache}")"
-    java -jar bin/apktool/APKEditor.jar b -f -i tmp/OplusService -o "${oplus_service_cache}.new.jar" || exit 1
-    unzip -tq "${oplus_service_cache}.new.jar" || exit 1
-    mv -f -- "${oplus_service_cache}.new.jar" "${oplus_service_cache}" || exit 1
-    cp -p -- "${oplus_service_cache}" "${targetOplusService}" || exit 1
+    if run_dex_patcher batch --file "tmp/$(basename "${targetOplusService}").bak" \
+        --output "${oplus_service_cache}.new.jar" "${dex_batch_args[@]}" && \
+       unzip -tq "${oplus_service_cache}.new.jar"; then
+        mv -f -- "${oplus_service_cache}.new.jar" "${oplus_service_cache}" || exit 1
+        cp -p -- "${oplus_service_cache}" "${targetOplusService}" || exit 1
+    else
+        rm -f -- "${oplus_service_cache}.new.jar"
+        java -jar bin/apktool/APKEditor.jar d -f -i "${targetOplusService}" -o tmp/OplusService || exit 1
+        targetSmali=$(find tmp/OplusService -type f -name "OplusBgSceneManager.smali" -print -quit)
+        if [[ -n "${targetSmali}" ]]; then
+            run_patchmethod "${targetSmali}" "-isGmsRestricted" || exit 1
+        fi
+        if [[ "${port_android_version}" == 17 ]]; then
+            run_patch_cos17_engineer tmp/OplusService || exit 1
+        fi
+        java -jar bin/apktool/APKEditor.jar b -f -i tmp/OplusService -o "${oplus_service_cache}.new.jar" || exit 1
+        unzip -tq "${oplus_service_cache}.new.jar" || exit 1
+        mv -f -- "${oplus_service_cache}.new.jar" "${oplus_service_cache}" || exit 1
+        cp -p -- "${oplus_service_cache}" "${targetOplusService}" || exit 1
+    fi
 fi
 if [[ "${port_android_version}" == 17 ]]; then
     rm -rf -- build/portrom/images/vendor/app/soterservice
@@ -1269,22 +1300,35 @@ if [[ -n "${targetAICallAssistant}" ]]; then
             "${targetAICallAssistant}" || exit 1
     else
         blue "Unlock AI Call"
+        mkdir -p tmp "build/${app_patch_folder}/patched"
         cp -p -- "${targetAICallAssistant}" \
             "tmp/$(basename "${targetAICallAssistant}").bak" || exit 1
-        apk_decode "${targetAICallAssistant}" tmp/HeyTapSpeechAssist \
-            --artifact HeyTapSpeechAssist.apk ${extra_args:-} || exit 1
-        targetSmali=$(find tmp/HeyTapSpeechAssist -type f -name 'AiCallCommonBean.smali' -print -quit)
-        if [[ -n "${targetSmali}" ]]; then
-            python3 bin/patchmethod_v2.py "${targetSmali}" getSupportAiCall -return true || exit 1
+        if run_dex_patcher batch \
+            --file "tmp/$(basename "${targetAICallAssistant}").bak" \
+            --output "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk.new.apk" \
+            --stub "AiCallCommonBean::getSupportAiCall=true" \
+            --replace-sget "MODEL=PLG110" && \
+           unzip -tq "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk.new.apk"; then
+            mv -f -- "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk.new.apk" \
+                "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" || exit 1
+            cp -p -- "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" \
+                "${targetAICallAssistant}" || exit 1
+        else
+            rm -f -- "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk.new.apk"
+            apk_decode "${targetAICallAssistant}" tmp/HeyTapSpeechAssist \
+                --artifact HeyTapSpeechAssist.apk ${extra_args:-} || exit 1
+            targetSmali=$(find tmp/HeyTapSpeechAssist -type f -name 'AiCallCommonBean.smali' -print -quit)
+            if [[ -n "${targetSmali}" ]]; then
+                run_patchmethod_v2 "${targetSmali}" getSupportAiCall -return true || exit 1
+            fi
+            find tmp/HeyTapSpeechAssist -type f -name '*.smali' -exec \
+                sed -i 's/sget-object \([vp][0-9]\+\), Landroid\/os\/Build;->MODEL:Ljava\/lang\/String;/const-string \1, "PLG110"/g' {} +
+            apk_build tmp/HeyTapSpeechAssist \
+                "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" \
+                --artifact HeyTapSpeechAssist.apk ${extra_args:-} || exit 1
+            cp -p -- "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" \
+                "${targetAICallAssistant}" || exit 1
         fi
-        find tmp/HeyTapSpeechAssist -type f -name '*.smali' -exec \
-            sed -i 's/sget-object \([vp][0-9]\+\), Landroid\/os\/Build;->MODEL:Ljava\/lang\/String;/const-string \1, "PLG110"/g' {} +
-        mkdir -p "build/${app_patch_folder}/patched"
-        apk_build tmp/HeyTapSpeechAssist \
-            "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" \
-            --artifact HeyTapSpeechAssist.apk ${extra_args:-} || exit 1
-        cp -p -- "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" \
-            "${targetAICallAssistant}" || exit 1
     fi
 fi
 # patch_smali_with_apktool "HeyTapSpeechAssist.apk" "com/heytap/speechassist/aicall/setting/config/AiCallCommonBean.smali" ".method public final getSupportAiCall()Z/,/.end method" ".method public final getSupportAiCall()Z\n\t.locals 1\n\tconst\/4 v0, 0x1\n\treturn v0\n.end method" "regex"
@@ -1312,14 +1356,15 @@ blue "保留移植包原始 OTA.apk" "Keeping the donor OTA.apk unchanged"
         
     elif [[ -f "${targetAIUnit}" ]]; then
         blue "Unlock High-End AI features, Device Model: $MODEL"
+        # Keeps apk_decode/apk_build because unit_config_list.json asset JSON must be updated with jq.
         cp -p -- "${targetAIUnit}" "tmp/$(basename "${targetAIUnit}").bak" || exit 1
         apk_decode "${targetAIUnit}" tmp/AIUnit --artifact AIUnit.apk ${extra_args:-} || exit 1
         find tmp/AIUnit -type f -name "*.smali" -exec sed -i "s/sget-object \([vp][0-9]\+\), Landroid\/os\/Build;->MODEL:Ljava\/lang\/String;/const-string \1, \"$MODEL\"/g" {} +
         targetSmali=$(find tmp/AIUnit -type f -name "UnitConfig.smali" -print -quit)
         if [[ -n "${targetSmali}" ]]; then
-            python3 bin/patchmethod_v2.py "${targetSmali}" isAllWhiteConditionMatch || exit 1
-            python3 bin/patchmethod_v2.py "${targetSmali}" isWhiteConditionsMatch || exit 1
-            python3 bin/patchmethod_v2.py "${targetSmali}" isSupport || exit 1
+            run_patchmethod_v2 "${targetSmali}" isAllWhiteConditionMatch || exit 1
+            run_patchmethod_v2 "${targetSmali}" isWhiteConditionsMatch || exit 1
+            run_patchmethod_v2 "${targetSmali}" isSupport || exit 1
         fi
 
         unit_config_list=$(find tmp/AIUnit -type f -name "unit_config_list.json" -print -quit)
@@ -1385,18 +1430,30 @@ elif [[ $base_android_version -lt 15 ]];then
         
     elif [[ -f "${targetGallery}" ]]; then
         blue "Unlock AI Editor"
+        mkdir -p tmp "build/${app_patch_folder}/patched"
         cp -p -- "${targetGallery}" "tmp/$(basename "${targetGallery}").bak" || exit 1
-        apk_decode "${targetGallery}" tmp/Gallery --artifact OppoGallery2.apk ${extra_args:-} || exit 1
-        python3 bin/patchmethod_v2.py -d tmp/Gallery -k 'const-string.*"ro.product.first_api_level"' -hook '     const/16 reg, 0x22' || exit 1
-        mkdir -p "build/${app_patch_folder}/patched"
-        apk_build tmp/Gallery "build/${app_patch_folder}/patched/OppoGallery2.apk" \
-            --artifact OppoGallery2.apk ${extra_args:-} || exit 1
-        cp -p -- "build/${app_patch_folder}/patched/OppoGallery2.apk" "${targetGallery}" || exit 1
+        if run_dex_patcher hook-after-string \
+            --file "tmp/$(basename "${targetGallery}").bak" \
+            --output "build/${app_patch_folder}/patched/OppoGallery2.apk.new.apk" \
+            --string "ro.product.first_api_level" --value 0x22 --require && \
+           unzip -tq "build/${app_patch_folder}/patched/OppoGallery2.apk.new.apk"; then
+            mv -f -- "build/${app_patch_folder}/patched/OppoGallery2.apk.new.apk" \
+                "build/${app_patch_folder}/patched/OppoGallery2.apk" || exit 1
+            cp -p -- "build/${app_patch_folder}/patched/OppoGallery2.apk" "${targetGallery}" || exit 1
+        else
+            rm -f -- "build/${app_patch_folder}/patched/OppoGallery2.apk.new.apk"
+            apk_decode "${targetGallery}" tmp/Gallery --artifact OppoGallery2.apk ${extra_args:-} || exit 1
+            run_patchmethod_v2 -d tmp/Gallery -k 'const-string.*"ro.product.first_api_level"' -hook '     const/16 reg, 0x22' || exit 1
+            apk_build tmp/Gallery "build/${app_patch_folder}/patched/OppoGallery2.apk" \
+                --artifact OppoGallery2.apk ${extra_args:-} || exit 1
+            cp -p -- "build/${app_patch_folder}/patched/OppoGallery2.apk" "${targetGallery}" || exit 1
+        fi
     fi
 fi
 
 if [[ ${base_device_family} == "OPSM8250" ]] || [[ ${base_device_family} == "OPSM8350" ]];then
     # Patch Battery Health Maximum capacity
+    # Keeps apk_decode/apk_build because patch_battery_soh.txt introduces external Java API references.
     targetBattery=$(find build/portrom/images/ -type f -name "Battery.apk" -print -quit)
     if [[ -f build/${app_patch_folder}/patched/Battery.apk ]]; then
         blue "复制已经处理过的Battery"
@@ -1408,7 +1465,7 @@ if [[ ${base_device_family} == "OPSM8250" ]] || [[ ${base_device_family} == "OPS
         apk_decode "${targetBattery}" tmp/Battery --artifact Battery.apk ${extra_args:-} || exit 1
         battery_apk_method=$(find tmp/Battery -type f -name '*.smali' -exec grep -l 'getUIsohValue' {} \; -print -quit)
         if [[ -n "${battery_apk_method}" ]]; then
-            python3 bin/patchmethod_v2.py -d tmp/Battery/ -k getUIsohValue -m devices/common/patch_battery_soh.txt || exit 1
+            run_patchmethod_v2 -d tmp/Battery/ -k getUIsohValue -m devices/common/patch_battery_soh.txt || exit 1
             mkdir -p "build/${app_patch_folder}/patched"
             apk_build tmp/Battery "build/${app_patch_folder}/patched/Battery.apk" \
                 --artifact Battery.apk ${extra_args:-} || exit 1
@@ -1423,6 +1480,7 @@ fi
 if [[ ${regionmark} != "CN" ]] && [[ ${base_product_model} != IN20* ]]; then
 
     # Charging info in Settings
+    # Keeps apk_decode/apk_build because res/xml/system_settings_preference.xml binary XML is edited.
     targetSettings=$(find build/portrom/images/ -type f -name "Settings.apk" -print -quit)
 
     if [[ -f "${targetSettings}" ]]; then
@@ -1432,7 +1490,7 @@ if [[ ${regionmark} != "CN" ]] && [[ ${base_product_model} != IN20* ]]; then
         patch_oplus_identity_settings_entry "$(find tmp/Settings -path '*/res/xml/system_settings_preference.xml' -print -quit)"
         targetSmali=$(find tmp/Settings -type f -name "DeviceChargeInfoController.smali" -print -quit)
         if [[ -n "${targetSmali}" ]]; then
-            python3 bin/patchmethod_v2.py "${targetSmali}" isPreferenceSupport || exit 1
+            run_patchmethod_v2 "${targetSmali}" isPreferenceSupport || exit 1
         fi
         apk_build tmp/Settings "${targetSettings}" --artifact Settings.apk ${extra_args:-} || exit 1
     fi
@@ -1442,13 +1500,24 @@ targetOplusLauncher=$(find build/portrom/images/ -type f -name "OplusLauncher.ap
 
 if [[ -f $targetOplusLauncher ]] && [[ $base_product_first_api_level -gt 34 ]];then
 	blue "解锁运存显示"
-	cp -rf $targetOplusLauncher tmp/$(basename $targetOplusLauncher).bak
-	apk_decode "${targetOplusLauncher}" tmp/OplusLauncher --artifact OplusLauncher.apk ${extra_args:-} || exit 1
-	targetSmali=$(find tmp/OplusLauncher -type f -path "*/com/oplus/basecommon/util/SystemPropertiesHelper.smali" -print -quit)
-    if [[ -n "${targetSmali}" ]]; then
-        python3 bin/patchmethod_v2.py "${targetSmali}" getFirstApiLevel ".locals 1\n\tconst/16 v0, 0x22\n\treturn v0" || exit 1
-    fi
-    apk_build tmp/OplusLauncher "${targetOplusLauncher}" --artifact OplusLauncher.apk ${extra_args:-} || exit 1
+	mkdir -p tmp
+	cp -rf "$targetOplusLauncher" "tmp/$(basename "$targetOplusLauncher").bak"
+	if run_dex_patcher stub-method \
+	    --file "tmp/$(basename "$targetOplusLauncher").bak" \
+	    --output "${targetOplusLauncher}.new.apk" \
+	    --class "com/oplus/basecommon/util/SystemPropertiesHelper" \
+	    --method "getFirstApiLevel" --return-int 0x22 && \
+	   unzip -tq "${targetOplusLauncher}.new.apk"; then
+	    mv -f -- "${targetOplusLauncher}.new.apk" "${targetOplusLauncher}" || exit 1
+	else
+	    rm -f -- "${targetOplusLauncher}.new.apk"
+	    apk_decode "${targetOplusLauncher}" tmp/OplusLauncher --artifact OplusLauncher.apk ${extra_args:-} || exit 1
+	    targetSmali=$(find tmp/OplusLauncher -type f -path "*/com/oplus/basecommon/util/SystemPropertiesHelper.smali" -print -quit)
+	    if [[ -n "${targetSmali}" ]]; then
+	        run_patchmethod_v2 "${targetSmali}" getFirstApiLevel ".locals 1\n\tconst/16 v0, 0x22\n\treturn v0" || exit 1
+	    fi
+	    apk_build tmp/OplusLauncher "${targetOplusLauncher}" --artifact OplusLauncher.apk ${extra_args:-} || exit 1
+	fi
 fi
 
 targetSystemUI=$(find build/portrom/images/ -type f -name "SystemUI.apk" -print -quit)
@@ -1457,67 +1526,106 @@ if [[ -f build/${app_patch_folder}/patched/SystemUI.apk ]]; then
         cp -rfv build/${app_patch_folder}/patched/SystemUI.apk $targetSystemUI
      
 elif [[ -f "$targetSystemUI" ]]; then
-    
-    cp -rf $targetSystemUI tmp/$(basename $targetSystemUI).bak
-    apk_decode "${targetSystemUI}" tmp/SystemUI --artifact SystemUI.apk ${extra_args:-} || exit 1
+    mkdir -p tmp "build/${app_patch_folder}/patched"
+    cp -rf "$targetSystemUI" "tmp/$(basename "$targetSystemUI").bak"
     blue "解锁全景全屏AOD"
-    targetSmoothTransitionControllerSmali=$(find tmp/SystemUI -type f -name "SmoothTransitionController.smali" -print -quit)
-    if [[ -n "${targetSmoothTransitionControllerSmali}" ]]; then
-        python3 bin/patchmethod_v2.py "${targetSmoothTransitionControllerSmali}" setPanoramicStatusForApplication || exit 1
-        python3 bin/patchmethod_v2.py "${targetSmoothTransitionControllerSmali}" setPanoramicSupportAllDayForApplication || exit 1
+    sysui_batch_args=(
+        --stub "SmoothTransitionController::setPanoramicStatusForApplication=true"
+        --stub "SmoothTransitionController::setPanoramicSupportAllDayForApplication=true"
+        --stub "AODDisplayUtil::isPanoramicProcessTypeNotSupportAllDay=false"
+        --stub "AODDisplayUtil::isPanoramicProcessTypeInEnergySaveSituation=false"
+    )
+    if [[ $base_product_first_api_level -gt 34 ]]; then
+        sysui_batch_args+=(--stub "StatusBarFeatureOption::isChargeVoocSpecialColorShow=true")
     fi
-
-    targetAODDisplayUtilSmali=$(find tmp/SystemUI -type f -name "AODDisplayUtil.smali" -print -quit)
-    if [[ -n "${targetAODDisplayUtilSmali}" ]]; then
-        python3 bin/patchmethod_v2.py "${targetAODDisplayUtilSmali}" isPanoramicProcessTypeNotSupportAllDay -return false || exit 1
-        python3 bin/patchmethod_v2.py "${targetAODDisplayUtilSmali}" isPanoramicProcessTypeInEnergySaveSituation -return false || exit 1
-    fi
-    if [[ $base_product_first_api_level -gt 34 ]];then
-    targetStatusBarFeatureOptionSmali=$(find tmp/SystemUI -type f -name "StatusBarFeatureOption.smali" -print -quit)
-    if [[ -n "${targetStatusBarFeatureOptionSmali}" ]]; then
-        python3 bin/patchmethod_v2.py "${targetStatusBarFeatureOptionSmali}" isChargeVoocSpecialColorShow -return true || exit 1
-    fi
-    fi
-    if [[ $regionmark != "CN" ]];then
+    if [[ $regionmark != "CN" ]]; then
         blue "解锁MyDevice"
-        targetSmali=$(find tmp/SystemUI -type f -name "FeatureOption.smali" -print -quit)
-        if [[ -n "${targetSmali}" ]]; then
-            python3 bin/patchmethod_v2.py "${targetSmali}" isSupportMyDevice || exit 1
-        fi
+        sysui_batch_args+=(--stub "FeatureOption::isSupportMyDevice=true")
     fi
-    # tmp workround 
-    for style_xml_file in $(find tmp/SystemUI -name "styles.xml");do 
-        sed -i "s/style\/null/7f1403f6/g" $style_xml_file
-    done
-    mkdir -p "build/${app_patch_folder}/patched"
-    apk_build tmp/SystemUI "build/${app_patch_folder}/patched/SystemUI.apk" \
-        --artifact SystemUI.apk ${extra_args:-} || exit 1
-    cp -p -- "build/${app_patch_folder}/patched/SystemUI.apk" "${targetSystemUI}" || exit 1
+    if run_dex_patcher batch \
+        --file "tmp/$(basename "$targetSystemUI").bak" \
+        --output "build/${app_patch_folder}/patched/SystemUI.apk.new.apk" \
+        "${sysui_batch_args[@]}" && \
+       unzip -tq "build/${app_patch_folder}/patched/SystemUI.apk.new.apk"; then
+        mv -f -- "build/${app_patch_folder}/patched/SystemUI.apk.new.apk" \
+            "build/${app_patch_folder}/patched/SystemUI.apk" || exit 1
+        cp -p -- "build/${app_patch_folder}/patched/SystemUI.apk" "${targetSystemUI}" || exit 1
+    else
+        rm -f -- "build/${app_patch_folder}/patched/SystemUI.apk.new.apk"
+        apk_decode "${targetSystemUI}" tmp/SystemUI --artifact SystemUI.apk ${extra_args:-} || exit 1
+        targetSmoothTransitionControllerSmali=$(find tmp/SystemUI -type f -name "SmoothTransitionController.smali" -print -quit)
+        if [[ -n "${targetSmoothTransitionControllerSmali}" ]]; then
+            run_patchmethod_v2 "${targetSmoothTransitionControllerSmali}" setPanoramicStatusForApplication || exit 1
+            run_patchmethod_v2 "${targetSmoothTransitionControllerSmali}" setPanoramicSupportAllDayForApplication || exit 1
+        fi
+
+        targetAODDisplayUtilSmali=$(find tmp/SystemUI -type f -name "AODDisplayUtil.smali" -print -quit)
+        if [[ -n "${targetAODDisplayUtilSmali}" ]]; then
+            run_patchmethod_v2 "${targetAODDisplayUtilSmali}" isPanoramicProcessTypeNotSupportAllDay -return false || exit 1
+            run_patchmethod_v2 "${targetAODDisplayUtilSmali}" isPanoramicProcessTypeInEnergySaveSituation -return false || exit 1
+        fi
+        if [[ $base_product_first_api_level -gt 34 ]];then
+        targetStatusBarFeatureOptionSmali=$(find tmp/SystemUI -type f -name "StatusBarFeatureOption.smali" -print -quit)
+        if [[ -n "${targetStatusBarFeatureOptionSmali}" ]]; then
+            run_patchmethod_v2 "${targetStatusBarFeatureOptionSmali}" isChargeVoocSpecialColorShow -return true || exit 1
+        fi
+        fi
+        if [[ $regionmark != "CN" ]];then
+            targetSmali=$(find tmp/SystemUI -type f -name "FeatureOption.smali" -print -quit)
+            if [[ -n "${targetSmali}" ]]; then
+                run_patchmethod_v2 "${targetSmali}" isSupportMyDevice || exit 1
+            fi
+        fi
+        # tmp workround 
+        for style_xml_file in $(find tmp/SystemUI -name "styles.xml");do 
+            sed -i "s/style\/null/7f1403f6/g" $style_xml_file
+        done
+        apk_build tmp/SystemUI "build/${app_patch_folder}/patched/SystemUI.apk" \
+            --artifact SystemUI.apk ${extra_args:-} || exit 1
+        cp -p -- "build/${app_patch_folder}/patched/SystemUI.apk" "${targetSystemUI}" || exit 1
+    fi
 fi
 
 targetAOD=$(find build/portrom/images/ -type f -name "Aod.apk" -print -quit)
 
 if [[ -f $targetAOD ]] && [[ $base_product_first_api_level -le 35 ]] ;then
 	blue "强制开启老机型AOD全天候息屏功能"
-	cp -rf $targetAOD tmp/$(basename $targetAOD).bak
-    apk_decode "${targetAOD}" tmp/Aod --artifact Aod.apk ${extra_args:-} || exit 1
-    targetCommonUtilsSmali=$(find tmp/Aod -type f -path "*/com/oplus/aod/util/CommonUtils.smali" -print -quit)
-    targetSettingsSmali=$(find tmp/Aod -type f -path "*/com/oplus/aod/util/SettingsUtils.smali" -print -quit)
-    if [[ -n "${targetCommonUtilsSmali}" ]]; then
-        python3 bin/patchmethod_v2.py "${targetCommonUtilsSmali}" isSupportFullAod -return true || exit 1
-        # ColorOS 16.1 gates the inspiration-continuity AOD picker on a
-        # per-user secure setting that older bases never seed.  Keep the
-        # explicit disable-feature predicate intact and only force the
-        # capability read when this marker is present.
-        if [[ ${port_android_version:-0} -ge 16 ]] && \
-           grep -qF 'oplus_keyguard_workshop_aod_support' "${targetCommonUtilsSmali}"; then
-            python3 bin/patch_inspiration_aod_gate.py "${targetCommonUtilsSmali}" || exit 1
-        fi
-    fi
-    if [[ -n "${targetSettingsSmali}" ]]; then
-        python3 bin/patchmethod_v2.py "${targetSettingsSmali}" getKeyAodAllDaySupportSettings -return true || exit 1
-    fi
-    apk_build tmp/Aod "${targetAOD}" --artifact Aod.apk ${extra_args:-} || exit 1
+	mkdir -p tmp
+	cp -rf "$targetAOD" "tmp/$(basename "$targetAOD").bak"
+	aod_batch_args=(
+	    --stub "Lcom/oplus/aod/util/CommonUtils;::isSupportFullAod=true"
+	    --stub "Lcom/oplus/aod/util/SettingsUtils;::getKeyAodAllDaySupportSettings=true"
+	)
+	if [[ ${port_android_version:-0} -ge 16 ]]; then
+	    aod_batch_args+=(--inspiration-aod-gate --optional-aod-gate)
+	fi
+	if run_dex_patcher batch \
+	    --file "tmp/$(basename "$targetAOD").bak" \
+	    --output "${targetAOD}.new.apk" \
+	    "${aod_batch_args[@]}" && \
+	   unzip -tq "${targetAOD}.new.apk"; then
+	    mv -f -- "${targetAOD}.new.apk" "${targetAOD}" || exit 1
+	else
+	    rm -f -- "${targetAOD}.new.apk"
+	    apk_decode "${targetAOD}" tmp/Aod --artifact Aod.apk ${extra_args:-} || exit 1
+	    targetCommonUtilsSmali=$(find tmp/Aod -type f -path "*/com/oplus/aod/util/CommonUtils.smali" -print -quit)
+	    targetSettingsSmali=$(find tmp/Aod -type f -path "*/com/oplus/aod/util/SettingsUtils.smali" -print -quit)
+	    if [[ -n "${targetCommonUtilsSmali}" ]]; then
+	        run_patchmethod_v2 "${targetCommonUtilsSmali}" isSupportFullAod -return true || exit 1
+	        # ColorOS 16.1 gates the inspiration-continuity AOD picker on a
+	        # per-user secure setting that older bases never seed.  Keep the
+	        # explicit disable-feature predicate intact and only force the
+	        # capability read when this marker is present.
+	        if [[ ${port_android_version:-0} -ge 16 ]] && \
+	           grep -qF 'oplus_keyguard_workshop_aod_support' "${targetCommonUtilsSmali}"; then
+	            run_patch_inspiration_aod_gate "${targetCommonUtilsSmali}" || exit 1
+	        fi
+	    fi
+	    if [[ -n "${targetSettingsSmali}" ]]; then
+	        run_patchmethod_v2 "${targetSettingsSmali}" getKeyAodAllDaySupportSettings -return true || exit 1
+	    fi
+	    apk_build tmp/Aod "${targetAOD}" --artifact Aod.apk ${extra_args:-} || exit 1
+	fi
 fi
 
 # Wallpapers contains a second copy of the ColorOS 16.1 workshop-AOD gate.
@@ -1525,20 +1633,39 @@ fi
 targetWallpapers=$(find build/portrom/images/ -type f -name "Wallpapers.apk" -print -quit)
 if [[ -f "${targetWallpapers}" ]] && [[ ${port_android_version:-0} -ge 16 ]] && \
    grep -aFq 'oplus_keyguard_workshop_aod_support' "${targetWallpapers}"; then
+    mkdir -p tmp "build/${app_patch_folder}/patched"
     cp -p -- "${targetWallpapers}" "tmp/$(basename "${targetWallpapers}").bak" || exit 1
-    # This patch changes only dex; preserve OEM resources and binary manifest.
-    apk_decode "${targetWallpapers}" tmp/Wallpapers --backend apktool --artifact Wallpapers.apk -r ${extra_args:-} || exit 1
-    targetWallpapersGateSmali=$(find tmp/Wallpapers -type f -path '*/com/oplus/wallpapers/rely/utils/m$z.smali' -print -quit)
-    if [[ -n "${targetWallpapersGateSmali}" ]] && \
-       grep -qF 'oplus_keyguard_workshop_aod_support' "${targetWallpapersGateSmali}"; then
-        python3 bin/patch_inspiration_aod_gate.py "${targetWallpapersGateSmali}" || exit 1
-        mkdir -p "build/${app_patch_folder}/patched"
-        apk_build tmp/Wallpapers "build/${app_patch_folder}/patched/Wallpapers.apk" \
-            --backend apktool --artifact Wallpapers.apk --copy-original ${extra_args:-} || exit 1
-        cp -p -- "build/${app_patch_folder}/patched/Wallpapers.apk" "${targetWallpapers}" || exit 1
+    if run_dex_patcher patch-inspiration-aod-gate \
+        --file "tmp/$(basename "${targetWallpapers}").bak" \
+        --output "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk" \
+        --optional && \
+       unzip -tq "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk"; then
+        if ! cmp -s "tmp/$(basename "${targetWallpapers}").bak" \
+            "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk"; then
+            mv -f -- "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk" \
+                "build/${app_patch_folder}/patched/Wallpapers.apk" || exit 1
+            cp -p -- "build/${app_patch_folder}/patched/Wallpapers.apk" \
+                "${targetWallpapers}" || exit 1
+        else
+            rm -f -- "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk"
+            yellow "Wallpapers.apk 未找到可识别的灵感AOD门控，保留原文件" \
+                "Wallpapers.apk has no recognizable inspiration-AOD gate; keeping its original logic"
+        fi
     else
-        yellow "Wallpapers.apk 未找到可识别的灵感AOD门控，保留原文件" \
-            "Wallpapers.apk has no recognizable inspiration-AOD gate; keeping its original logic"
+        rm -f -- "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk"
+        # This patch changes only dex; preserve OEM resources and binary manifest.
+        apk_decode "${targetWallpapers}" tmp/Wallpapers --backend apktool --artifact Wallpapers.apk -r ${extra_args:-} || exit 1
+        targetWallpapersGateSmali=$(find tmp/Wallpapers -type f -path '*/com/oplus/wallpapers/rely/utils/m$z.smali' -print -quit)
+        if [[ -n "${targetWallpapersGateSmali}" ]] && \
+           grep -qF 'oplus_keyguard_workshop_aod_support' "${targetWallpapersGateSmali}"; then
+            run_patch_inspiration_aod_gate "${targetWallpapersGateSmali}" || exit 1
+            apk_build tmp/Wallpapers "build/${app_patch_folder}/patched/Wallpapers.apk" \
+                --backend apktool --artifact Wallpapers.apk --copy-original ${extra_args:-} || exit 1
+            cp -p -- "build/${app_patch_folder}/patched/Wallpapers.apk" "${targetWallpapers}" || exit 1
+        else
+            yellow "Wallpapers.apk 未找到可识别的灵感AOD门控，保留原文件" \
+                "Wallpapers.apk has no recognizable inspiration-AOD gate; keeping its original logic"
+        fi
     fi
 fi
 yellow "删除多余的App" "Debloating..." 
@@ -2957,18 +3084,29 @@ remove_data_encrypt="${remove_data_encryption}"
 if [[ ${remove_data_encrypt} == "true" ]];then
     DECRYPTRD="-DECRYPTED"
     blue "去除data加密"
-	while IFS= read -r -d '' fstab; do
-		blue "Target: $fstab"
-		sed -i "s/,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0//g" "${fstab}"
-		sed -i "s/,fileencryption=aes-256-xts:aes-256-cts:v2+emmc_optimized+wrappedkey_v0//g" "${fstab}"
-		sed -i "s/,fileencryption=aes-256-xts:aes-256-cts:v2//g" "${fstab}"
-		sed -i "s/,metadata_encryption=aes-256-xts:wrappedkey_v0//g" "${fstab}"
-		sed -i "s/,fileencryption=aes-256-xts:wrappedkey_v0//g" "${fstab}"
-		sed -i "s/,metadata_encryption=aes-256-xts//g" "${fstab}"
-		sed -i "s/,fileencryption=aes-256-xts//g" "${fstab}"
-        sed -i "s/,fileencryption=ice//g" "${fstab}"
-		sed -i "s/fileencryption/encryptable/g" "${fstab}"
-	done < <(find build/portrom/images -type f -name "fstab.*" -print0)
+    if _prop_bin="$(_port::resolve_rust_bin prop-tool)" || _prop_bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        while IFS= read -r -d '' fstab; do
+            blue "Target: $fstab"
+            if [[ "${_prop_bin}" == *coloros-tools* ]]; then
+                "${_prop_bin}" prop-tool clean-fstab --fstab "${fstab}" --remove-encryption || exit 1
+            else
+                "${_prop_bin}" clean-fstab --fstab "${fstab}" --remove-encryption || exit 1
+            fi
+        done < <(find build/portrom/images -type f -name "fstab.*" -print0)
+    else
+        while IFS= read -r -d '' fstab; do
+            blue "Target: $fstab"
+            sed -i "s/,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0//g" "${fstab}"
+            sed -i "s/,fileencryption=aes-256-xts:aes-256-cts:v2+emmc_optimized+wrappedkey_v0//g" "${fstab}"
+            sed -i "s/,fileencryption=aes-256-xts:aes-256-cts:v2//g" "${fstab}"
+            sed -i "s/,metadata_encryption=aes-256-xts:wrappedkey_v0//g" "${fstab}"
+            sed -i "s/,fileencryption=aes-256-xts:wrappedkey_v0//g" "${fstab}"
+            sed -i "s/,metadata_encryption=aes-256-xts//g" "${fstab}"
+            sed -i "s/,fileencryption=aes-256-xts//g" "${fstab}"
+            sed -i "s/,fileencryption=ice//g" "${fstab}"
+            sed -i "s/fileencryption/encryptable/g" "${fstab}"
+        done < <(find build/portrom/images -type f -name "fstab.*" -print0)
+    fi
 fi
 
 # for pname in ${port_partition};do
@@ -3007,8 +3145,7 @@ for pname in ${super_list};do
             error "缺少 ${pname} 打包配置" "Missing ${pname} packing configuration"
             exit 1
         fi
-        python3 bin/fspatch.py "build/portrom/images/${pname}" "${fs_config}" || exit 1
-        python3 bin/contextpatch.py "build/portrom/images/${pname}" "${file_contexts}" || exit 1
+        run_fs_and_context_patch "build/portrom/images/${pname}" "${fs_config}" "${file_contexts}" || exit 1
         # contextpatch.py rebuilds vendor_file_contexts from the extracted
         # tree and drops recursive rules that do not correspond to a concrete
         # file.  Re-apply the Android 17 overlay and /dev/ion rules before
