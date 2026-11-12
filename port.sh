@@ -1303,32 +1303,19 @@ if [[ -n "${targetAICallAssistant}" ]]; then
         mkdir -p tmp "build/${app_patch_folder}/patched"
         cp -p -- "${targetAICallAssistant}" \
             "tmp/$(basename "${targetAICallAssistant}").bak" || exit 1
-        if run_dex_patcher batch \
-            --file "tmp/$(basename "${targetAICallAssistant}").bak" \
-            --output "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk.new.apk" \
-            --stub "AiCallCommonBean::getSupportAiCall=true" \
-            --replace-sget "MODEL=PLG110" && \
-           unzip -tq "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk.new.apk"; then
-            mv -f -- "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk.new.apk" \
-                "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" || exit 1
-            cp -p -- "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" \
-                "${targetAICallAssistant}" || exit 1
-        else
-            rm -f -- "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk.new.apk"
-            apk_decode "${targetAICallAssistant}" tmp/HeyTapSpeechAssist \
-                --artifact HeyTapSpeechAssist.apk ${extra_args:-} || exit 1
-            targetSmali=$(find tmp/HeyTapSpeechAssist -type f -name 'AiCallCommonBean.smali' -print -quit)
-            if [[ -n "${targetSmali}" ]]; then
-                run_patchmethod_v2 "${targetSmali}" getSupportAiCall -return true || exit 1
-            fi
-            find tmp/HeyTapSpeechAssist -type f -name '*.smali' -exec \
-                sed -i 's/sget-object \([vp][0-9]\+\), Landroid\/os\/Build;->MODEL:Ljava\/lang\/String;/const-string \1, "PLG110"/g' {} +
-            apk_build tmp/HeyTapSpeechAssist \
-                "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" \
-                --artifact HeyTapSpeechAssist.apk ${extra_args:-} || exit 1
-            cp -p -- "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" \
-                "${targetAICallAssistant}" || exit 1
+        apk_decode "${targetAICallAssistant}" tmp/HeyTapSpeechAssist \
+            --artifact HeyTapSpeechAssist.apk ${extra_args:-} || exit 1
+        targetSmali=$(find tmp/HeyTapSpeechAssist -type f -name 'AiCallCommonBean.smali' -print -quit)
+        if [[ -n "${targetSmali}" ]]; then
+            run_patchmethod_v2 "${targetSmali}" getSupportAiCall -return true || exit 1
         fi
+        find tmp/HeyTapSpeechAssist -type f -name '*.smali' -exec \
+            sed -i 's/sget-object \([vp][0-9]\+\), Landroid\/os\/Build;->MODEL:Ljava\/lang\/String;/const-string \1, "PLG110"/g' {} +
+        apk_build tmp/HeyTapSpeechAssist \
+            "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" \
+            --artifact HeyTapSpeechAssist.apk ${extra_args:-} || exit 1
+        cp -p -- "build/${app_patch_folder}/patched/HeyTapSpeechAssist.apk" \
+            "${targetAICallAssistant}" || exit 1
     fi
 fi
 # patch_smali_with_apktool "HeyTapSpeechAssist.apk" "com/heytap/speechassist/aicall/setting/config/AiCallCommonBean.smali" ".method public final getSupportAiCall()Z/,/.end method" ".method public final getSupportAiCall()Z\n\t.locals 1\n\tconst\/4 v0, 0x1\n\treturn v0\n.end method" "regex"
@@ -1432,22 +1419,11 @@ elif [[ $base_android_version -lt 15 ]];then
         blue "Unlock AI Editor"
         mkdir -p tmp "build/${app_patch_folder}/patched"
         cp -p -- "${targetGallery}" "tmp/$(basename "${targetGallery}").bak" || exit 1
-        if run_dex_patcher hook-after-string \
-            --file "tmp/$(basename "${targetGallery}").bak" \
-            --output "build/${app_patch_folder}/patched/OppoGallery2.apk.new.apk" \
-            --string "ro.product.first_api_level" --value 0x22 --require && \
-           unzip -tq "build/${app_patch_folder}/patched/OppoGallery2.apk.new.apk"; then
-            mv -f -- "build/${app_patch_folder}/patched/OppoGallery2.apk.new.apk" \
-                "build/${app_patch_folder}/patched/OppoGallery2.apk" || exit 1
-            cp -p -- "build/${app_patch_folder}/patched/OppoGallery2.apk" "${targetGallery}" || exit 1
-        else
-            rm -f -- "build/${app_patch_folder}/patched/OppoGallery2.apk.new.apk"
-            apk_decode "${targetGallery}" tmp/Gallery --artifact OppoGallery2.apk ${extra_args:-} || exit 1
-            run_patchmethod_v2 -d tmp/Gallery -k 'const-string.*"ro.product.first_api_level"' -hook '     const/16 reg, 0x22' || exit 1
-            apk_build tmp/Gallery "build/${app_patch_folder}/patched/OppoGallery2.apk" \
-                --artifact OppoGallery2.apk ${extra_args:-} || exit 1
-            cp -p -- "build/${app_patch_folder}/patched/OppoGallery2.apk" "${targetGallery}" || exit 1
-        fi
+        apk_decode "${targetGallery}" tmp/Gallery --artifact OppoGallery2.apk ${extra_args:-} || exit 1
+        run_patchmethod_v2 -d tmp/Gallery -k 'const-string.*"ro.product.first_api_level"' -hook '     const/16 reg, 0x22' || exit 1
+        apk_build tmp/Gallery "build/${app_patch_folder}/patched/OppoGallery2.apk" \
+            --artifact OppoGallery2.apk ${extra_args:-} || exit 1
+        cp -p -- "build/${app_patch_folder}/patched/OppoGallery2.apk" "${targetGallery}" || exit 1
     fi
 fi
 
@@ -1502,22 +1478,12 @@ if [[ -f $targetOplusLauncher ]] && [[ $base_product_first_api_level -gt 34 ]];t
 	blue "解锁运存显示"
 	mkdir -p tmp
 	cp -rf "$targetOplusLauncher" "tmp/$(basename "$targetOplusLauncher").bak"
-	if run_dex_patcher stub-method \
-	    --file "tmp/$(basename "$targetOplusLauncher").bak" \
-	    --output "${targetOplusLauncher}.new.apk" \
-	    --class "com/oplus/basecommon/util/SystemPropertiesHelper" \
-	    --method "getFirstApiLevel" --return-int 0x22 && \
-	   unzip -tq "${targetOplusLauncher}.new.apk"; then
-	    mv -f -- "${targetOplusLauncher}.new.apk" "${targetOplusLauncher}" || exit 1
-	else
-	    rm -f -- "${targetOplusLauncher}.new.apk"
-	    apk_decode "${targetOplusLauncher}" tmp/OplusLauncher --artifact OplusLauncher.apk ${extra_args:-} || exit 1
-	    targetSmali=$(find tmp/OplusLauncher -type f -path "*/com/oplus/basecommon/util/SystemPropertiesHelper.smali" -print -quit)
-	    if [[ -n "${targetSmali}" ]]; then
-	        run_patchmethod_v2 "${targetSmali}" getFirstApiLevel ".locals 1\n\tconst/16 v0, 0x22\n\treturn v0" || exit 1
-	    fi
-	    apk_build tmp/OplusLauncher "${targetOplusLauncher}" --artifact OplusLauncher.apk ${extra_args:-} || exit 1
+	apk_decode "${targetOplusLauncher}" tmp/OplusLauncher --artifact OplusLauncher.apk ${extra_args:-} || exit 1
+	targetSmali=$(find tmp/OplusLauncher -type f -path "*/com/oplus/basecommon/util/SystemPropertiesHelper.smali" -print -quit)
+	if [[ -n "${targetSmali}" ]]; then
+	    run_patchmethod_v2 "${targetSmali}" getFirstApiLevel ".locals 1\n\tconst/16 v0, 0x22\n\treturn v0" || exit 1
 	fi
+	apk_build tmp/OplusLauncher "${targetOplusLauncher}" --artifact OplusLauncher.apk ${extra_args:-} || exit 1
 fi
 
 targetSystemUI=$(find build/portrom/images/ -type f -name "SystemUI.apk" -print -quit)
@@ -1529,61 +1495,37 @@ elif [[ -f "$targetSystemUI" ]]; then
     mkdir -p tmp "build/${app_patch_folder}/patched"
     cp -rf "$targetSystemUI" "tmp/$(basename "$targetSystemUI").bak"
     blue "解锁全景全屏AOD"
-    sysui_batch_args=(
-        --stub "SmoothTransitionController::setPanoramicStatusForApplication=true"
-        --stub "SmoothTransitionController::setPanoramicSupportAllDayForApplication=true"
-        --stub "AODDisplayUtil::isPanoramicProcessTypeNotSupportAllDay=false"
-        --stub "AODDisplayUtil::isPanoramicProcessTypeInEnergySaveSituation=false"
-    )
-    if [[ $base_product_first_api_level -gt 34 ]]; then
-        sysui_batch_args+=(--stub "StatusBarFeatureOption::isChargeVoocSpecialColorShow=true")
+    apk_decode "${targetSystemUI}" tmp/SystemUI --artifact SystemUI.apk ${extra_args:-} || exit 1
+    targetSmoothTransitionControllerSmali=$(find tmp/SystemUI -type f -name "SmoothTransitionController.smali" -print -quit)
+    if [[ -n "${targetSmoothTransitionControllerSmali}" ]]; then
+        run_patchmethod_v2 "${targetSmoothTransitionControllerSmali}" setPanoramicStatusForApplication || exit 1
+        run_patchmethod_v2 "${targetSmoothTransitionControllerSmali}" setPanoramicSupportAllDayForApplication || exit 1
     fi
-    if [[ $regionmark != "CN" ]]; then
-        blue "解锁MyDevice"
-        sysui_batch_args+=(--stub "FeatureOption::isSupportMyDevice=true")
-    fi
-    if run_dex_patcher batch \
-        --file "tmp/$(basename "$targetSystemUI").bak" \
-        --output "build/${app_patch_folder}/patched/SystemUI.apk.new.apk" \
-        "${sysui_batch_args[@]}" && \
-       unzip -tq "build/${app_patch_folder}/patched/SystemUI.apk.new.apk"; then
-        mv -f -- "build/${app_patch_folder}/patched/SystemUI.apk.new.apk" \
-            "build/${app_patch_folder}/patched/SystemUI.apk" || exit 1
-        cp -p -- "build/${app_patch_folder}/patched/SystemUI.apk" "${targetSystemUI}" || exit 1
-    else
-        rm -f -- "build/${app_patch_folder}/patched/SystemUI.apk.new.apk"
-        apk_decode "${targetSystemUI}" tmp/SystemUI --artifact SystemUI.apk ${extra_args:-} || exit 1
-        targetSmoothTransitionControllerSmali=$(find tmp/SystemUI -type f -name "SmoothTransitionController.smali" -print -quit)
-        if [[ -n "${targetSmoothTransitionControllerSmali}" ]]; then
-            run_patchmethod_v2 "${targetSmoothTransitionControllerSmali}" setPanoramicStatusForApplication || exit 1
-            run_patchmethod_v2 "${targetSmoothTransitionControllerSmali}" setPanoramicSupportAllDayForApplication || exit 1
-        fi
 
-        targetAODDisplayUtilSmali=$(find tmp/SystemUI -type f -name "AODDisplayUtil.smali" -print -quit)
-        if [[ -n "${targetAODDisplayUtilSmali}" ]]; then
-            run_patchmethod_v2 "${targetAODDisplayUtilSmali}" isPanoramicProcessTypeNotSupportAllDay -return false || exit 1
-            run_patchmethod_v2 "${targetAODDisplayUtilSmali}" isPanoramicProcessTypeInEnergySaveSituation -return false || exit 1
-        fi
-        if [[ $base_product_first_api_level -gt 34 ]];then
-        targetStatusBarFeatureOptionSmali=$(find tmp/SystemUI -type f -name "StatusBarFeatureOption.smali" -print -quit)
-        if [[ -n "${targetStatusBarFeatureOptionSmali}" ]]; then
-            run_patchmethod_v2 "${targetStatusBarFeatureOptionSmali}" isChargeVoocSpecialColorShow -return true || exit 1
-        fi
-        fi
-        if [[ $regionmark != "CN" ]];then
-            targetSmali=$(find tmp/SystemUI -type f -name "FeatureOption.smali" -print -quit)
-            if [[ -n "${targetSmali}" ]]; then
-                run_patchmethod_v2 "${targetSmali}" isSupportMyDevice || exit 1
-            fi
-        fi
-        # tmp workround 
-        for style_xml_file in $(find tmp/SystemUI -name "styles.xml");do 
-            sed -i "s/style\/null/7f1403f6/g" $style_xml_file
-        done
-        apk_build tmp/SystemUI "build/${app_patch_folder}/patched/SystemUI.apk" \
-            --artifact SystemUI.apk ${extra_args:-} || exit 1
-        cp -p -- "build/${app_patch_folder}/patched/SystemUI.apk" "${targetSystemUI}" || exit 1
+    targetAODDisplayUtilSmali=$(find tmp/SystemUI -type f -name "AODDisplayUtil.smali" -print -quit)
+    if [[ -n "${targetAODDisplayUtilSmali}" ]]; then
+        run_patchmethod_v2 "${targetAODDisplayUtilSmali}" isPanoramicProcessTypeNotSupportAllDay -return false || exit 1
+        run_patchmethod_v2 "${targetAODDisplayUtilSmali}" isPanoramicProcessTypeInEnergySaveSituation -return false || exit 1
     fi
+    if [[ $base_product_first_api_level -gt 34 ]];then
+    targetStatusBarFeatureOptionSmali=$(find tmp/SystemUI -type f -name "StatusBarFeatureOption.smali" -print -quit)
+    if [[ -n "${targetStatusBarFeatureOptionSmali}" ]]; then
+        run_patchmethod_v2 "${targetStatusBarFeatureOptionSmali}" isChargeVoocSpecialColorShow -return true || exit 1
+    fi
+    fi
+    if [[ $regionmark != "CN" ]];then
+        targetSmali=$(find tmp/SystemUI -type f -name "FeatureOption.smali" -print -quit)
+        if [[ -n "${targetSmali}" ]]; then
+            run_patchmethod_v2 "${targetSmali}" isSupportMyDevice || exit 1
+        fi
+    fi
+    # tmp workround 
+    for style_xml_file in $(find tmp/SystemUI -name "styles.xml");do 
+        sed -i "s/style\/null/7f1403f6/g" $style_xml_file
+    done
+    apk_build tmp/SystemUI "build/${app_patch_folder}/patched/SystemUI.apk" \
+        --artifact SystemUI.apk ${extra_args:-} || exit 1
+    cp -p -- "build/${app_patch_folder}/patched/SystemUI.apk" "${targetSystemUI}" || exit 1
 fi
 
 targetAOD=$(find build/portrom/images/ -type f -name "Aod.apk" -print -quit)
@@ -1592,40 +1534,24 @@ if [[ -f $targetAOD ]] && [[ $base_product_first_api_level -le 35 ]] ;then
 	blue "强制开启老机型AOD全天候息屏功能"
 	mkdir -p tmp
 	cp -rf "$targetAOD" "tmp/$(basename "$targetAOD").bak"
-	aod_batch_args=(
-	    --stub "Lcom/oplus/aod/util/CommonUtils;::isSupportFullAod=true"
-	    --stub "Lcom/oplus/aod/util/SettingsUtils;::getKeyAodAllDaySupportSettings=true"
-	)
-	if [[ ${port_android_version:-0} -ge 16 ]]; then
-	    aod_batch_args+=(--inspiration-aod-gate --optional-aod-gate)
-	fi
-	if run_dex_patcher batch \
-	    --file "tmp/$(basename "$targetAOD").bak" \
-	    --output "${targetAOD}.new.apk" \
-	    "${aod_batch_args[@]}" && \
-	   unzip -tq "${targetAOD}.new.apk"; then
-	    mv -f -- "${targetAOD}.new.apk" "${targetAOD}" || exit 1
-	else
-	    rm -f -- "${targetAOD}.new.apk"
-	    apk_decode "${targetAOD}" tmp/Aod --artifact Aod.apk ${extra_args:-} || exit 1
-	    targetCommonUtilsSmali=$(find tmp/Aod -type f -path "*/com/oplus/aod/util/CommonUtils.smali" -print -quit)
-	    targetSettingsSmali=$(find tmp/Aod -type f -path "*/com/oplus/aod/util/SettingsUtils.smali" -print -quit)
-	    if [[ -n "${targetCommonUtilsSmali}" ]]; then
-	        run_patchmethod_v2 "${targetCommonUtilsSmali}" isSupportFullAod -return true || exit 1
-	        # ColorOS 16.1 gates the inspiration-continuity AOD picker on a
-	        # per-user secure setting that older bases never seed.  Keep the
-	        # explicit disable-feature predicate intact and only force the
-	        # capability read when this marker is present.
-	        if [[ ${port_android_version:-0} -ge 16 ]] && \
-	           grep -qF 'oplus_keyguard_workshop_aod_support' "${targetCommonUtilsSmali}"; then
-	            run_patch_inspiration_aod_gate "${targetCommonUtilsSmali}" || exit 1
-	        fi
+	apk_decode "${targetAOD}" tmp/Aod --artifact Aod.apk ${extra_args:-} || exit 1
+	targetCommonUtilsSmali=$(find tmp/Aod -type f -path "*/com/oplus/aod/util/CommonUtils.smali" -print -quit)
+	targetSettingsSmali=$(find tmp/Aod -type f -path "*/com/oplus/aod/util/SettingsUtils.smali" -print -quit)
+	if [[ -n "${targetCommonUtilsSmali}" ]]; then
+	    run_patchmethod_v2 "${targetCommonUtilsSmali}" isSupportFullAod -return true || exit 1
+	    # ColorOS 16.1 gates the inspiration-continuity AOD picker on a
+	    # per-user secure setting that older bases never seed.  Keep the
+	    # explicit disable-feature predicate intact and only force the
+	    # capability read when this marker is present.
+	    if [[ ${port_android_version:-0} -ge 16 ]] && \
+	       grep -qF 'oplus_keyguard_workshop_aod_support' "${targetCommonUtilsSmali}"; then
+	        run_patch_inspiration_aod_gate "${targetCommonUtilsSmali}" || exit 1
 	    fi
-	    if [[ -n "${targetSettingsSmali}" ]]; then
-	        run_patchmethod_v2 "${targetSettingsSmali}" getKeyAodAllDaySupportSettings -return true || exit 1
-	    fi
-	    apk_build tmp/Aod "${targetAOD}" --artifact Aod.apk ${extra_args:-} || exit 1
 	fi
+	if [[ -n "${targetSettingsSmali}" ]]; then
+	    run_patchmethod_v2 "${targetSettingsSmali}" getKeyAodAllDaySupportSettings -return true || exit 1
+	fi
+	apk_build tmp/Aod "${targetAOD}" --artifact Aod.apk ${extra_args:-} || exit 1
 fi
 
 # Wallpapers contains a second copy of the ColorOS 16.1 workshop-AOD gate.
@@ -1635,37 +1561,18 @@ if [[ -f "${targetWallpapers}" ]] && [[ ${port_android_version:-0} -ge 16 ]] && 
    grep -aFq 'oplus_keyguard_workshop_aod_support' "${targetWallpapers}"; then
     mkdir -p tmp "build/${app_patch_folder}/patched"
     cp -p -- "${targetWallpapers}" "tmp/$(basename "${targetWallpapers}").bak" || exit 1
-    if run_dex_patcher patch-inspiration-aod-gate \
-        --file "tmp/$(basename "${targetWallpapers}").bak" \
-        --output "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk" \
-        --optional && \
-       unzip -tq "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk"; then
-        if ! cmp -s "tmp/$(basename "${targetWallpapers}").bak" \
-            "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk"; then
-            mv -f -- "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk" \
-                "build/${app_patch_folder}/patched/Wallpapers.apk" || exit 1
-            cp -p -- "build/${app_patch_folder}/patched/Wallpapers.apk" \
-                "${targetWallpapers}" || exit 1
-        else
-            rm -f -- "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk"
-            yellow "Wallpapers.apk 未找到可识别的灵感AOD门控，保留原文件" \
-                "Wallpapers.apk has no recognizable inspiration-AOD gate; keeping its original logic"
-        fi
+    # This patch changes only dex; preserve OEM resources and binary manifest.
+    apk_decode "${targetWallpapers}" tmp/Wallpapers --backend apktool --artifact Wallpapers.apk -r ${extra_args:-} || exit 1
+    targetWallpapersGateSmali=$(find tmp/Wallpapers -type f -path '*/com/oplus/wallpapers/rely/utils/m$z.smali' -print -quit)
+    if [[ -n "${targetWallpapersGateSmali}" ]] && \
+       grep -qF 'oplus_keyguard_workshop_aod_support' "${targetWallpapersGateSmali}"; then
+        run_patch_inspiration_aod_gate "${targetWallpapersGateSmali}" || exit 1
+        apk_build tmp/Wallpapers "build/${app_patch_folder}/patched/Wallpapers.apk" \
+            --backend apktool --artifact Wallpapers.apk --copy-original ${extra_args:-} || exit 1
+        cp -p -- "build/${app_patch_folder}/patched/Wallpapers.apk" "${targetWallpapers}" || exit 1
     else
-        rm -f -- "build/${app_patch_folder}/patched/Wallpapers.apk.new.apk"
-        # This patch changes only dex; preserve OEM resources and binary manifest.
-        apk_decode "${targetWallpapers}" tmp/Wallpapers --backend apktool --artifact Wallpapers.apk -r ${extra_args:-} || exit 1
-        targetWallpapersGateSmali=$(find tmp/Wallpapers -type f -path '*/com/oplus/wallpapers/rely/utils/m$z.smali' -print -quit)
-        if [[ -n "${targetWallpapersGateSmali}" ]] && \
-           grep -qF 'oplus_keyguard_workshop_aod_support' "${targetWallpapersGateSmali}"; then
-            run_patch_inspiration_aod_gate "${targetWallpapersGateSmali}" || exit 1
-            apk_build tmp/Wallpapers "build/${app_patch_folder}/patched/Wallpapers.apk" \
-                --backend apktool --artifact Wallpapers.apk --copy-original ${extra_args:-} || exit 1
-            cp -p -- "build/${app_patch_folder}/patched/Wallpapers.apk" "${targetWallpapers}" || exit 1
-        else
-            yellow "Wallpapers.apk 未找到可识别的灵感AOD门控，保留原文件" \
-                "Wallpapers.apk has no recognizable inspiration-AOD gate; keeping its original logic"
-        fi
+        yellow "Wallpapers.apk 未找到可识别的灵感AOD门控，保留原文件" \
+            "Wallpapers.apk has no recognizable inspiration-AOD gate; keeping its original logic"
     fi
 fi
 yellow "删除多余的App" "Debloating..." 
