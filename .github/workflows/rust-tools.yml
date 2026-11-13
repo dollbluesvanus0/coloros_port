@@ -65,7 +65,7 @@ jobs:
         run: |
           mkdir -p "${{ matrix.dest_dir }}"
           cp -f "tools-rust/target/${{ matrix.target }}/release/coloros-tools" "${{ matrix.dest_dir }}/"
-          for tool in rom-fs-patcher dex-patcher smali-patcher prop-tool; do
+          for tool in rom-fs-patcher dex-patcher smali-patcher prop-tool fix-arsc; do
             ln -sf coloros-tools "${{ matrix.dest_dir }}/${tool}"
           done
       - uses: actions/upload-artifact@v4

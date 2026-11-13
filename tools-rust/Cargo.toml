@@ -58,6 +58,7 @@ prop-tool.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+zip.workspace = true
 
 [profile.release]
 opt-level = 3

@@ -36,6 +36,25 @@ enum Commands {
     /// Stage 4: Batch build.prop and fstab processor
     #[command(visible_aliases = ["proptool"])]
     PropTool(prop_tool::Cli),
+    /// Fix invalid TYPE_ATTRIBUTE references in resources.arsc (e.g. 0x0196xxxx dynamic colors)
+    #[command(visible_aliases = ["patch-arsc", "arsc-fix", "fixarsc"])]
+    FixArsc {
+        /// Path to APK, ZIP, or resources.arsc file
+        #[arg(short, long)]
+        file: Option<std::path::PathBuf>,
+
+        /// Positional path to APK, ZIP, or resources.arsc file if `--file` is omitted
+        #[arg(value_name = "TARGET")]
+        target: Option<std::path::PathBuf>,
+
+        /// Optional output path (defaults to in-place modification)
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+
+        /// Fail if zero attributes were patched
+        #[arg(long)]
+        require: bool,
+    },
 }
 
 /// Dispatch CLI invocation from an arbitrary argument iterator (`argv[0..n]`).
@@ -107,6 +126,19 @@ where
                 let sub = prop_tool::Cli::try_parse_from(&args_vec)?;
                 return prop_tool::run_cli(sub);
             }
+            "fix-arsc" | "patch-arsc" | "arsc-fix" | "arsc-patcher" => {
+                let mut forwarded = Vec::with_capacity(args_vec.len() + 1);
+                forwarded.push(OsString::from("coloros-tools"));
+                forwarded.push(OsString::from("fix-arsc"));
+                forwarded.extend_from_slice(&args_vec[1..]);
+                let cli = Cli::try_parse_from(forwarded)?;
+                return match cli.command {
+                    Commands::FixArsc { file, target, output, require } => {
+                        dex_patcher::run_fix_arsc(file, target, output, require)
+                    }
+                    _ => unreachable!(),
+                };
+            }
             _ => {}
         }
     }
@@ -117,6 +149,9 @@ where
         Commands::DexPatcher(sub) => dex_patcher::run_cli(sub),
         Commands::SmaliPatcher(sub) => smali_patcher::run_cli(sub),
         Commands::PropTool(sub) => prop_tool::run_cli(sub),
+        Commands::FixArsc { file, target, output, require } => {
+            dex_patcher::run_fix_arsc(file, target, output, require)
+        }
     }
 }
 
@@ -238,6 +273,73 @@ mod tests {
         let content = fs::read_to_string(&prop_file).unwrap();
         assert!(content.contains("ro.debuggable=1"));
         assert!(!content.contains("persist.old.key"));
+    }
+
+    #[test]
+    fn test_dispatcher_fix_arsc_and_multicall() {
+        let dir = tempdir().unwrap();
+        let apk_path = dir.path().join("test.apk");
+        let mut full_table = Vec::new();
+        let header_type = 28usize;
+        let entry_count = 1usize;
+        let entries_start = header_type + entry_count * 4;
+        let entry0 = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x08, 0x00, 0x00, 0x02, 0x18, 0x00, 0x96, 0x01,
+        ];
+        let type_size = (entries_start + entry0.len()) as u32;
+        let mut type_c = Vec::new();
+        type_c.extend_from_slice(&0x0201u16.to_le_bytes());
+        type_c.extend_from_slice(&(header_type as u16).to_le_bytes());
+        type_c.extend_from_slice(&type_size.to_le_bytes());
+        type_c.extend_from_slice(&[0x06, 0x00, 0x00, 0x00]);
+        type_c.extend_from_slice(&(entry_count as u32).to_le_bytes());
+        type_c.extend_from_slice(&(entries_start as u32).to_le_bytes());
+        type_c.extend_from_slice(&[0u8; 8]);
+        type_c.extend_from_slice(&0u32.to_le_bytes());
+        type_c.extend_from_slice(&entry0);
+
+        let pkg_size = (16 + type_c.len()) as u32;
+        let mut pkg_c = Vec::new();
+        pkg_c.extend_from_slice(&0x0200u16.to_le_bytes());
+        pkg_c.extend_from_slice(&16u16.to_le_bytes());
+        pkg_c.extend_from_slice(&pkg_size.to_le_bytes());
+        pkg_c.extend_from_slice(&[0u8; 8]);
+        pkg_c.extend_from_slice(&type_c);
+
+        let tbl_size = (12 + pkg_c.len()) as u32;
+        full_table.extend_from_slice(&0x0002u16.to_le_bytes());
+        full_table.extend_from_slice(&12u16.to_le_bytes());
+        full_table.extend_from_slice(&tbl_size.to_le_bytes());
+        full_table.extend_from_slice(&1u32.to_le_bytes());
+        full_table.extend_from_slice(&pkg_c);
+
+        let mut zip_bytes = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
+            zw.start_file("resources.arsc", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+            std::io::Write::write_all(&mut zw, &full_table).unwrap();
+            zw.finish().unwrap();
+        }
+        fs::write(&apk_path, &zip_bytes).unwrap();
+
+        // 1. Test top-level `coloros-tools fix-arsc --file <apk>`
+        run_from_args([
+            "coloros-tools",
+            "fix-arsc",
+            "--file",
+            apk_path.to_str().unwrap(),
+            "--require",
+        ])
+        .unwrap();
+
+        // 2. Test multicall `fix-arsc --file <apk>`
+        run_from_args([
+            "fix-arsc",
+            "--file",
+            apk_path.to_str().unwrap(),
+        ])
+        .unwrap();
     }
 
     #[test]

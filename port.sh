@@ -1525,6 +1525,7 @@ elif [[ -f "$targetSystemUI" ]]; then
     done
     apk_build tmp/SystemUI "build/${app_patch_folder}/patched/SystemUI.apk" \
         --artifact SystemUI.apk ${extra_args:-} || exit 1
+    run_fix_arsc "build/${app_patch_folder}/patched/SystemUI.apk"
     cp -p -- "build/${app_patch_folder}/patched/SystemUI.apk" "${targetSystemUI}" || exit 1
 fi
 

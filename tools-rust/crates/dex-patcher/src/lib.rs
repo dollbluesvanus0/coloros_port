@@ -4,6 +4,7 @@
 //! and in-memory patching of `.apk` / `.jar` ZIP containers with automatic
 //! SHA-1 signature + Adler32 checksum recalculation and 4-byte `zipalign` alignment.
 
+pub mod arsc;
 pub mod builder;
 pub mod container;
 pub mod dex;
@@ -279,6 +280,26 @@ pub enum Commands {
         /// Do not fail if `--inspiration-aod-gate` finds 0 matches
         #[arg(long)]
         optional_aod_gate: bool,
+    },
+
+    /// Fix invalid TYPE_ATTRIBUTE references in resources.arsc (e.g. 0x0196xxxx dynamic color tokens)
+    #[command(visible_aliases = ["patch-arsc", "arsc-fix", "fixarsc"])]
+    FixArsc {
+        /// Path to APK, ZIP, or resources.arsc file
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+
+        /// Positional path to APK, ZIP, or resources.arsc file if `--file` is omitted
+        #[arg(value_name = "TARGET")]
+        target: Option<PathBuf>,
+
+        /// Optional output path (defaults to in-place modification)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Fail if zero attributes were patched
+        #[arg(long)]
+        require: bool,
     },
 }
 
@@ -665,7 +686,42 @@ pub fn run_cli(cli: Cli) -> Result<()> {
             println!("[+] batch: applied {} total modification(s) to {}", total, file.display());
             Ok(())
         }
+
+        Commands::FixArsc {
+            file,
+            target,
+            output,
+            require,
+        } => run_fix_arsc(file, target, output, require),
     }
+}
+
+/// Run the `fix-arsc` command against a file or container.
+pub fn run_fix_arsc(
+    file: Option<PathBuf>,
+    target: Option<PathBuf>,
+    output: Option<PathBuf>,
+    require: bool,
+) -> Result<()> {
+    let target_file = file
+        .or(target)
+        .context("Missing target file (pass --file <PATH> or positional <TARGET>)")?;
+
+    let count = container::patch_arsc_in_container(&target_file, output.as_deref())?;
+
+    if require && count == 0 {
+        bail!(
+            "fix-arsc --require: no invalid TYPE_ATTRIBUTE references found in {}",
+            target_file.display()
+        );
+    }
+
+    println!(
+        "[+] fix-arsc: patched {} attribute reference(s) (TYPE_ATTRIBUTE -> TYPE_REFERENCE) in {}",
+        count,
+        target_file.display()
+    );
+    Ok(())
 }
 
 /// Apply APK Protection patch to either a `.jar`/`.apk`/`.dex` file or a decompiled directory.
@@ -2229,5 +2285,84 @@ mod tests {
         let mut dex_entry = Vec::new();
         std::io::Read::read_to_end(&mut za.by_name("classes.dex").unwrap(), &mut dex_entry).unwrap();
         assert_strict_mapped_dex_valid(&dex_entry);
+    }
+
+    #[test]
+    fn test_fix_arsc_cli_apk_container_and_alignment() {
+        // Construct a synthetic ARSC with 1 bad 0x0196 attribute
+        let header_size_type = 28usize;
+        let entry_count = 1usize;
+        let entries_start = header_size_type + entry_count * 4;
+        let entry0_data = [
+            0x00, 0x00, // flags = simple (0)
+            0x00, 0x00, // key index
+            0x00, 0x00, 0x00, 0x00,
+            0x08, 0x00, // size = 8
+            0x00,       // res0
+            0x02,       // dataType = TYPE_ATTRIBUTE (0x02)
+            0x18, 0x00, 0x96, 0x01, // data = 0x01960018
+        ];
+        let type_chunk_size = (entries_start + entry0_data.len()) as u32;
+        let mut type_chunk = Vec::new();
+        type_chunk.extend_from_slice(&0x0201u16.to_le_bytes());
+        type_chunk.extend_from_slice(&(header_size_type as u16).to_le_bytes());
+        type_chunk.extend_from_slice(&type_chunk_size.to_le_bytes());
+        type_chunk.extend_from_slice(&[0x06, 0x00, 0x00, 0x00]);
+        type_chunk.extend_from_slice(&(entry_count as u32).to_le_bytes());
+        type_chunk.extend_from_slice(&(entries_start as u32).to_le_bytes());
+        type_chunk.extend_from_slice(&[0u8; 8]);
+        type_chunk.extend_from_slice(&0u32.to_le_bytes());
+        type_chunk.extend_from_slice(&entry0_data);
+
+        let pkg_header_size = 16usize;
+        let pkg_chunk_size = (pkg_header_size + type_chunk.len()) as u32;
+        let mut pkg_chunk = Vec::new();
+        pkg_chunk.extend_from_slice(&0x0200u16.to_le_bytes());
+        pkg_chunk.extend_from_slice(&(pkg_header_size as u16).to_le_bytes());
+        pkg_chunk.extend_from_slice(&pkg_chunk_size.to_le_bytes());
+        pkg_chunk.extend_from_slice(&[0u8; 8]);
+        pkg_chunk.extend_from_slice(&type_chunk);
+
+        let table_header_size = 12usize;
+        let table_chunk_size = (table_header_size + pkg_chunk.len()) as u32;
+        let mut table = Vec::new();
+        table.extend_from_slice(&0x0002u16.to_le_bytes());
+        table.extend_from_slice(&(table_header_size as u16).to_le_bytes());
+        table.extend_from_slice(&table_chunk_size.to_le_bytes());
+        table.extend_from_slice(&1u32.to_le_bytes());
+        table.extend_from_slice(&pkg_chunk);
+
+        let tmp = TempDir::new().unwrap();
+        let apk_path = tmp.path().join("SystemUI_test.apk");
+        let mut zip_buf = Vec::new();
+        {
+            let mut zw = ZipWriter::new(std::io::Cursor::new(&mut zip_buf));
+            let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            zw.start_file("resources.arsc", stored).unwrap();
+            zw.write_all(&table).unwrap();
+            zw.finish().unwrap();
+        }
+        fs::write(&apk_path, &zip_buf).unwrap();
+
+        // Run fix-arsc CLI
+        let cli = Cli::parse_from([
+            "dex-patcher",
+            "fix-arsc",
+            "--file",
+            apk_path.to_str().unwrap(),
+            "--require",
+        ]);
+        run_cli(cli).unwrap();
+
+        let updated_zip = fs::read(&apk_path).unwrap();
+        verify_zip_alignment_4(&updated_zip).unwrap();
+
+        let mut za = zip::ZipArchive::new(std::io::Cursor::new(updated_zip)).unwrap();
+        let mut arsc_entry = Vec::new();
+        std::io::Read::read_to_end(&mut za.by_name("resources.arsc").unwrap(), &mut arsc_entry).unwrap();
+
+        // Check that dataType is now TYPE_REFERENCE (0x01)
+        let ep0 = table_header_size + pkg_header_size + entries_start;
+        assert_eq!(arsc_entry[ep0 + 11], 0x01);
     }
 }

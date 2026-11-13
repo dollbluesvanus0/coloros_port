@@ -205,6 +205,16 @@ run_contextpatch() {
     fi
 }
 
+run_fix_arsc() {
+    local target="$1"
+    local bin=""
+    if bin="$(_port::resolve_rust_bin fix-arsc)" || bin="$(_port::resolve_rust_bin dex-patcher)"; then
+        "${bin}" fix-arsc --file "${target}" || true
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" fix-arsc --file "${target}" || true
+    fi
+}
+
 smali_kit="run_smali_kit"
 
 _port::lower() {
@@ -671,6 +681,10 @@ apk_build() {
             _port::run_apkeditor bin/apktool/APKEditor.jar b -f -i "${input_dir}" -o "${output_file}" "${args[@]}" || return 1
             ;;
     esac
+
+    if [[ -f "${output_file}" ]]; then
+        run_fix_arsc "${output_file}"
+    fi
 }
 
 
