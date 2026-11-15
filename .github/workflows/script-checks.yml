@@ -1,0 +1,36 @@
+name: Check Port Scripts
+
+on:
+  push:
+    paths:
+      - 'port.sh'
+      - 'functions.sh'
+      - 'bin/port_performance.sh'
+      - 'bin/tree_size.py'
+      - 'tests/test_port_performance.py'
+      - '.github/workflows/script-checks.yml'
+  pull_request:
+    paths:
+      - 'port.sh'
+      - 'functions.sh'
+      - 'bin/port_performance.sh'
+      - 'bin/tree_size.py'
+      - 'tests/test_port_performance.py'
+      - '.github/workflows/script-checks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax
+        run: |
+          for script in port.sh functions.sh bin/port_performance.sh; do
+            bash -n "$script"
+          done
+      - name: Check packing and I/O helpers without ROM images
+        run: python3 -m unittest discover -s tests -p test_port_performance.py -v

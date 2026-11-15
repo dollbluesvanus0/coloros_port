@@ -1368,6 +1368,8 @@ patch_kernel_to_bootimg() {
 # its historical build/<version>/ layout, while these helpers add a source
 # digest sidecar so a different archive with the same version name can never be
 # mistaken for a valid cache hit.
+source "$(dirname "${BASH_SOURCE[0]}")/bin/port_performance.sh" || return 1
+
 port_sha256_file() {
     local file="${1:-}"
     local output=""
@@ -1390,17 +1392,6 @@ port_file_size_bytes() {
     else
         stat -c%s "${file}"
     fi
-}
-
-port_tree_size_bytes() {
-    local root="${1:-}"
-    local file size total=0
-    [[ -d "${root}" ]] || return 1
-    while IFS= read -r -d '' file; do
-        size="$(port_file_size_bytes "${file}")" || return 1
-        total=$((total + size))
-    done < <(find "${root}" -type f -print0)
-    printf '%s\n' "${total}"
 }
 
 port_rom_fingerprint() {
@@ -1429,6 +1420,9 @@ port_cache_has_images() {
 }
 
 port_cache_store_images() {
+    # CI removes this cache immediately after extraction. Do not write a
+    # second multi-gigabyte copy only to delete it in the same run.
+    [[ "${PORT_LOW_DISK:-false}" != true ]] || return 0
     local dir="${1:-}"
     local source_dir="${2:-}"
     local hash="${3:-}"
@@ -1440,7 +1434,7 @@ port_cache_store_images() {
     mkdir -p "${dir}" || return 1
     for image in "${source_dir}"/*.img; do
         [[ -s "${image}" ]] || continue
-        cp -f -- "${image}" "${dir}/" || return 1
+        port_copy_image "${image}" "${dir}/${image##*/}" || return 1
         image_count=$((image_count + 1))
     done
     # Do not publish an apparently valid sidecar for an empty extraction.  A
@@ -1472,14 +1466,16 @@ _port::pack_partition_erofs() {
     local tmp_img="${out_img}.tmp.$$"
     local log_file="${tmp_img}.log"
     local rc=0
+    local -a worker_args=()
+    [[ -z "${PORT_EROFS_WORKERS:-}" ]] || worker_args+=("--workers=${PORT_EROFS_WORKERS}")
     rm -f -- "${tmp_img}" "${log_file}"
     if [[ "${PORT_VERBOSE:-false}" == "true" ]]; then
-        mkfs.erofs -zlz4hc,12 --mount-point "${pname}" \
+        mkfs.erofs "${worker_args[@]}" -zlz4hc,12 --mount-point "${pname}" \
             --fs-config-file "${fs_cfg}" \
             --file-contexts "${file_ctx}" \
             -T 1648635685 "${tmp_img}" "${src_dir}" || rc=$?
     else
-        mkfs.erofs -zlz4hc,12 --mount-point "${pname}" \
+        mkfs.erofs "${worker_args[@]}" -zlz4hc,12 --mount-point "${pname}" \
             --fs-config-file "${fs_cfg}" \
             --file-contexts "${file_ctx}" \
             -T 1648635685 "${tmp_img}" "${src_dir}" >"${log_file}" 2>&1 || rc=$?

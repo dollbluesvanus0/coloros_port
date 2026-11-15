@@ -76,6 +76,7 @@ fi
 printf '%s\n' "$$" > "${PORT_LOCK_DIR}/pid"
 _port_cleanup() {
     local rc=$?
+    port_wait_workers
     rm -rf -- "${PORT_LOCK_DIR}"
     exit "${rc}"
 }
@@ -108,6 +109,9 @@ repackext4="$(port_config_get repack_with_ext4 false)"
 super_extended="$(port_config_get super_extended false)"
 pack_with_dsu="$(port_config_get pack_with_dsu false)"
 pack_method="${PACK_METHOD:-$(port_config_get pack_method stock)}"
+PORT_PACK_JOBS="${PORT_PACK_JOBS:-$(port_config_get pack_jobs auto)}"
+export PORT_PACK_JOBS
+port_pack_job_count "$(port_cpu_count)" >/dev/null || exit 2
 _norm_pack_method="$(printf '%s' "${pack_method}" | tr '[:upper:]' '[:lower:]')"
 if [[ "${_norm_pack_method}" == "fastboot" ]]; then
     pack_method="fastboot"
@@ -331,7 +335,7 @@ if [[ "${baserom_type}" != "br" ]]; then
     if port_cache_has_images "${baserom_cache_path}" "system,product,system_ext,my_product,my_manifest"; then
         baserom_cache_hit=true
         mkdir -p build/baserom/images/
-        cp -f -- "${baserom_cache_path}"/*.img build/baserom/images/ || exit 1
+        port_copy_images "${baserom_cache_path}" build/baserom/images || exit 1
         green "底包缓存命中，跳过重复解包" "BASEROM cache hit; skipping extraction"
     fi
 fi
@@ -442,9 +446,9 @@ if [[ "${port_cache_hit}" == full ]]; then
     blue "检测到按 SHA-256 验证的移植包缓存，跳过重复解包" "SHA-256 verified port cache hit; skipping extraction"
     mkdir -p "build/${version_name}" build/portrom/images/
     if [[ "${port_cache_source}" != "build/${version_name}" ]]; then
-        cp -f -- "${port_cache_source}"/*.img "build/${version_name}/" 2>/dev/null || true
+        port_copy_images "${port_cache_source}" "build/${version_name}" || exit 1
     fi
-    cp -f -- "${port_cache_source}"/*.img build/portrom/images/
+    port_copy_images "${port_cache_source}" build/portrom/images || exit 1
     printf '%s\n' "${portrom_hash}" > "build/${version_name}/.source.sha256"
 else
     mkdir -p "build/${version_name}" build/portrom/images/
@@ -455,8 +459,8 @@ else
         for _requested_part in "${_requested_parts[@]}"; do
             [[ -n "${_requested_part}" ]] || continue
             if [[ -s "${port_cache_path}/${_requested_part}.img" ]]; then
-                cp -f -- "${port_cache_path}/${_requested_part}.img" "build/${version_name}/${_requested_part}.img" || exit 1
-                cp -f -- "${port_cache_path}/${_requested_part}.img" build/portrom/images/ || exit 1
+                port_copy_image "${port_cache_path}/${_requested_part}.img" "build/${version_name}/${_requested_part}.img" || exit 1
+                port_copy_image "${port_cache_path}/${_requested_part}.img" "build/portrom/images/${_requested_part}.img" || exit 1
             else
                 extract_parts+="${_requested_part},"
             fi
@@ -480,7 +484,7 @@ else
             if [[ -n "${_payload_extract_parts}" ]]; then
                 blue "正在提取移植包 [payload.bin]" "Extracting PORTROM [payload.bin]"
                 payload-extract extract -p "${_payload_extract_parts}" -o "build/${version_name}/" "${portrom}" || exit 1
-                cp -f -- "build/${version_name}"/*.img build/portrom/images/ 2>/dev/null || true
+                port_copy_images "build/${version_name}" build/portrom/images || exit 1
             else
                 blue "缺失分区均不存在于 payload，跳过解包" "Missing partitions are not in payload; skipping extraction"
             fi
@@ -507,7 +511,9 @@ else
                 error "解压指定 img 文件失败，请检查移植包内容" "Failed to extract selected images from PORTROM"
                 exit 1
             fi
-            find "build/${version_name}/" -type f -name "*.img" -exec cp -f -- {} build/portrom/images/ \;
+            while IFS= read -r -d '' _image; do
+                port_copy_image "${_image}" "build/portrom/images/${_image##*/}" || exit 1
+            done < <(find "build/${version_name}/" -type f -name '*.img' -print0)
             green "移植包 [*.img] 提取完毕" "[*.img] extracted."
         fi
     else
@@ -544,9 +550,9 @@ if [[ -n "${version_name2}" ]]; then
         mkdir -p "build/${version_name2}" build/portrom/images/
         for _mix_part in "${mix_port_part[@]}"; do
             if [[ "${port_cache2_source}" != "build/${version_name2}" ]]; then
-                cp -f -- "${port_cache2_source}/${_mix_part}.img" "build/${version_name2}/" || exit 1
+                port_copy_image "${port_cache2_source}/${_mix_part}.img" "build/${version_name2}/${_mix_part}.img" || exit 1
             fi
-            cp -f -- "${port_cache2_source}/${_mix_part}.img" build/portrom/images/ || exit 1
+            port_copy_image "${port_cache2_source}/${_mix_part}.img" "build/portrom/images/${_mix_part}.img" || exit 1
         done
         printf '%s\n' "${portrom2_hash}" > "build/${version_name2}/.source.sha256"
         port_version2_cache_valid=true
@@ -556,8 +562,8 @@ if [[ -n "${version_name2}" ]]; then
         for _mix_part in "${mix_port_part[@]}"; do
             [[ -n "${_mix_part}" ]] || continue
             if [[ -s "${port_cache_path2}/${_mix_part}.img" ]]; then
-                cp -f -- "${port_cache_path2}/${_mix_part}.img" "build/${version_name2}/${_mix_part}.img" || exit 1
-                cp -f -- "${port_cache_path2}/${_mix_part}.img" build/portrom/images/ || exit 1
+                port_copy_image "${port_cache_path2}/${_mix_part}.img" "build/${version_name2}/${_mix_part}.img" || exit 1
+                port_copy_image "${port_cache_path2}/${_mix_part}.img" "build/portrom/images/${_mix_part}.img" || exit 1
             else
                 extract2_parts+="${_mix_part},"
             fi
@@ -576,7 +582,7 @@ if [[ -n "${version_name2}" ]]; then
                     payload-extract extract -p "${_payload2_extract_parts}" -o "build/${version_name2}/" "${portrom2}" || exit 1
                     for _mix_part in "${mix_port_part[@]}"; do
                         [[ -s "build/${version_name2}/${_mix_part}.img" ]] || continue
-                        cp -f -- "build/${version_name2}/${_mix_part}.img" build/portrom/images/ || exit 1
+                        port_copy_image "build/${version_name2}/${_mix_part}.img" "build/portrom/images/${_mix_part}.img" || exit 1
                     done
                 fi
             fi
@@ -593,7 +599,9 @@ if [[ -n "${version_name2}" ]]; then
             done < <(unzip -Z1 "${portrom2}" 2>/dev/null)
             if [[ ${#unzip_targets2[@]} -gt 0 ]]; then
                 unzip -qo "${portrom2}" "${unzip_targets2[@]}" -d "build/${version_name2}/" || exit 1
-                find "build/${version_name2}/" -type f -name "*.img" -exec cp -f -- {} build/portrom/images/ \;
+                while IFS= read -r -d '' _image; do
+                    port_copy_image "${_image}" "build/portrom/images/${_image##*/}" || exit 1
+                done < <(find "build/${version_name2}/" -type f -name '*.img' -print0)
             fi
         fi
         printf '%s\n' "${portrom2_hash}" > "build/${version_name2}/.source.sha256"
@@ -3043,49 +3051,7 @@ port_apply_bluetooth_display_overrides "${work_dir}/build/portrom/images" || {
     exit 1
 }
 green "开始打包镜像" "Packing img"
-for pname in ${super_list};do
-    if [ -d "build/portrom/images/$pname" ];then
-        thisSize="$(port_tree_size_bytes "build/portrom/images/${pname}")" || exit 1
-        blue 以[$pack_type]文件系统打包[${pname}.img] "Packing [${pname}.img] with [$pack_type] filesystem"
-        fs_config="build/portrom/images/config/${pname}_fs_config"
-        file_contexts="build/portrom/images/config/${pname}_file_contexts"
-        if [[ ! -f "${fs_config}" || ! -f "${file_contexts}" ]]; then
-            error "缺少 ${pname} 打包配置" "Missing ${pname} packing configuration"
-            exit 1
-        fi
-        run_fs_and_context_patch "build/portrom/images/${pname}" "${fs_config}" "${file_contexts}" || exit 1
-        # contextpatch.py rebuilds vendor_file_contexts from the extracted
-        # tree and drops recursive rules that do not correspond to a concrete
-        # file.  Re-apply the Android 17 overlay and /dev/ion rules before
-        # mkfs.erofs consumes the final file-contexts file.
-        if [[ ${port_android_version} == 17 && ${pname} == "vendor" ]];then
-            if ! a17_patch_vendor_context_file \
-                "build/portrom/images/config/vendor_file_contexts" \
-                "build/diagnostics/a17-compat/originals/vendor-file-contexts";then
-                error "重打包前最终 vendor_file_contexts 校验失败" \
-                    "Final vendor_file_contexts validation failed before repack"
-                exit 1
-            fi
-        fi
-        if [[ "${pack_type}" == "EXT" ]]; then
-            if ! _port::pack_partition_ext4 "${pname}" "build/portrom/images/${pname}" \
-                "${fs_config}" "${file_contexts}" "build/portrom/images/${pname}.img" "${thisSize}"; then
-                error "以 [${pack_type}] 文件系统打包 [${pname}] 分区失败" "Failed to pack [${pname}]"
-                exit 1
-            fi
-            green "成功以 [ext4] 文件系统打包 [${pname}.img]" "Packing [${pname}.img] successfully with [ext4] format"
-        else
-            if ! _port::pack_partition_erofs "${pname}" "build/portrom/images/${pname}" \
-                "${fs_config}" "${file_contexts}" "build/portrom/images/${pname}.img"; then
-                error "以 [${pack_type}] 文件系统打包 [${pname}] 分区失败" "Failed to pack [${pname}]"
-                exit 1
-            fi
-            green "成功以 [erofs] 文件系统打包 [${pname}.img]" "Packing [${pname}.img] successfully with [erofs] format"
-        fi
-        unset fsType
-        unset thisSize
-    fi
-done
+port_pack_images ${super_list} || exit 1
 
 
 rm -f -- fstype.txt
@@ -3340,7 +3306,7 @@ else
     zstd -T0 build/portrom/images/super.img -o build/portrom/super.zst || exit 1
     if [[ "${PORT_LOW_DISK:-false}" == true ]]; then
         rm -f build/portrom/images/super.img
-        rm -rf tmp build/baserom
+        rm -rf tmp
         df -h .
     fi
 
@@ -3481,6 +3447,10 @@ else
         
     fi
 
+    if [[ "${PORT_LOW_DISK:-false}" == true ]]; then
+        # Firmware and boot images have now been staged into the package.
+        rm -rf -- build/baserom
+    fi
     find out/${os_type}_${rom_version} |xargs touch
     pushd out/${os_type}_${rom_version}/ >/dev/null || exit
     # Images are already zstd-compressed. Avoid compressing them a second time.
