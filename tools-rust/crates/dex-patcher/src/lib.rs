@@ -2294,9 +2294,9 @@ mod tests {
         let entry_count = 1usize;
         let entries_start = header_size_type + entry_count * 4;
         let entry0_data = [
+            0x08, 0x00, // entry size = 8
             0x00, 0x00, // flags = simple (0)
-            0x00, 0x00, // key index
-            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, // key index
             0x08, 0x00, // size = 8
             0x00,       // res0
             0x02,       // dataType = TYPE_ATTRIBUTE (0x02)
