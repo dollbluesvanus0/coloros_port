@@ -1355,6 +1355,7 @@ patch_kernel_to_bootimg() {
 # digest sidecar so a different archive with the same version name can never be
 # mistaken for a valid cache hit.
 source "$(dirname "${BASH_SOURCE[0]}")/bin/port_performance.sh" || return 1
+source "$(dirname "${BASH_SOURCE[0]}")/bin/systemui_color_compat.sh" || return 1
 
 port_sha256_file() {
     local file="${1:-}"

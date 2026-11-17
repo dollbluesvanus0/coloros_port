@@ -2954,6 +2954,13 @@ if ! _port::stage_postdata_compat; then
     exit 1
 fi
 
+# Fix invalid framework color attributes after all device overlays and APK
+# rebuilds, before filesystem metadata generation. Keep SystemUI's signature.
+if ! _port::stage_systemui_color_compat; then
+    error "SystemUI 颜色兼容修复失败" "SystemUI color compatibility fix failed"
+    exit 1
+fi
+
 # Android 17 Qualcomm HIDL ports optionally use the common VNDK-30 IMS APK.
 # The helper is gated by the extracted VINTF declarations and is a no-op when
 # the release asset is unavailable or the target already exposes AIDL IMS.
