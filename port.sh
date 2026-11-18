@@ -3056,6 +3056,8 @@ port_apply_bluetooth_display_overrides "${work_dir}/build/portrom/images" || {
     error "蓝牙/显示属性更新失败" "Failed to apply Bluetooth/display overrides"
     exit 1
 }
+# The provider check must see the final partition contents after all overlays.
+python3 bin/webview_compat.py "${work_dir}/build/portrom/images" || exit 1
 green "开始打包镜像" "Packing img"
 port_pack_images ${super_list} || exit 1
 

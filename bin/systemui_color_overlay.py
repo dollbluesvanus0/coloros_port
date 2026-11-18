@@ -98,7 +98,7 @@ def write_sources(fixes, output):
     ET.ElementTree(manifest).write(output / 'AndroidManifest.xml', encoding='utf-8', xml_declaration=True)
 
 
-def update_overlay_config(path, enabled):
+def update_overlay_config(path, enabled, package=PACKAGE):
     """OverlayConfig overrides manifest isStatic/priority when it exists."""
     path = Path(path)
     if not path.is_file():
@@ -108,7 +108,7 @@ def update_overlay_config(path, enabled):
     root = tree.getroot()
     if root.tag != 'config':
         raise ValueError(f'Unexpected overlay config root: {root.tag}')
-    matches = [child for child in root if child.tag == 'overlay' and child.get('package') == PACKAGE]
+    matches = [child for child in root if child.tag == 'overlay' and child.get('package') == package]
     if enabled and len(matches) == 1 and matches[0] is list(root)[0] and (
             matches[0].get('enabled'), matches[0].get('mutable')) == ('true', 'false'):
         return
@@ -119,12 +119,12 @@ def update_overlay_config(path, enabled):
     if enabled:
         # Android requires immutable entries before all mutable ones, including
         # those inside <merge> files. Prepending preserves every existing order.
-        root.insert(0, ET.Element('overlay', package=PACKAGE, enabled='true', mutable='false'))
+        root.insert(0, ET.Element('overlay', package=package, enabled='true', mutable='false'))
     tree.write(path, encoding='utf-8', xml_declaration=True)
 
 
-def aapt_dump(aapt2, kind, apk):
-    result = subprocess.run([str(aapt2), 'dump', kind, str(apk)],
+def aapt_dump(aapt2, kind, apk, *args):
+    result = subprocess.run([str(aapt2), 'dump', kind, str(apk), *args],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
     if result.returncode:
         raise ValueError(f'AAPT2 could not inspect {apk}: {result.stderr.strip()}')
