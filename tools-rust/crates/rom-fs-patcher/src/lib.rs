@@ -112,6 +112,10 @@ const EXEC_SH_EXCEPTIONS: &[&str] = &[
     about = "SELinux file_contexts and fs_config patcher"
 )]
 pub struct Cli {
+    /// Print every added entry instead of only summary counts
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -147,18 +151,28 @@ pub enum Commands {
 }
 
 pub fn run_cli(cli: Cli) -> Result<()> {
+    run_cli_with_logger(cli, &mut |args| println!("{args}"))
+}
+
+fn run_cli_with_logger(cli: Cli, log: &mut dyn FnMut(std::fmt::Arguments<'_>)) -> Result<()> {
+    let verbose = cli.verbose;
     match cli.command {
         Some(Commands::ContextPatch {
             folder,
             file_contexts,
         }) => {
-            context_patch_file(&folder, &file_contexts)?;
-            println!("Done!");
+            context_patch_file_with_logger(
+                Path::new(&folder),
+                Path::new(&file_contexts),
+                verbose,
+                log,
+            )?;
+            log(format_args!("Done!"));
             Ok(())
         }
         Some(Commands::FsPatch { folder, fs_config }) => {
-            fs_patch_file(&folder, &fs_config)?;
-            println!("Done!");
+            fs_patch_file_with_logger(Path::new(&folder), Path::new(&fs_config), verbose, log)?;
+            log(format_args!("Done!"));
             Ok(())
         }
         Some(Commands::PatchAll {
@@ -166,8 +180,14 @@ pub fn run_cli(cli: Cli) -> Result<()> {
             fs_config,
             file_contexts,
         }) => {
-            patch_all_files(&folder, &fs_config, &file_contexts)?;
-            println!("Done!");
+            patch_all_files_with_logger(
+                Path::new(&folder),
+                Path::new(&fs_config),
+                Path::new(&file_contexts),
+                verbose,
+                log,
+            )?;
+            log(format_args!("Done!"));
             Ok(())
         }
         None => Ok(()),
@@ -218,11 +238,39 @@ pub fn str_to_selinux(s: &str) -> String {
 /// `quick_ratio` is an upper bound on `ratio()` that counts character frequencies in `b`
 /// and matches against `a`: `2.0 * matches / (len(a) + len(b))`.
 pub fn sequence_matcher_quick_ratio(a: &str, b: &str) -> f64 {
+    if a.is_ascii() && b.is_ascii() && b.len() <= i32::MAX as usize {
+        let len_a = a.len();
+        let len_b = b.len();
+        let total = len_a + len_b;
+        if total == 0 {
+            return 1.0;
+        }
+        if len_a == 0 || len_b == 0 {
+            return 0.0;
+        }
+        let mut avail = [0i32; 128];
+        for &byte in b.as_bytes() {
+            avail[byte as usize] += 1;
+        }
+        let mut matches: usize = 0;
+        for &byte in a.as_bytes() {
+            let count = &mut avail[byte as usize];
+            if *count > 0 {
+                *count -= 1;
+                matches += 1;
+            }
+        }
+        return (2.0 * matches as f64) / (total as f64);
+    }
+
     let len_a = a.chars().count();
     let len_b = b.chars().count();
     let total = len_a + len_b;
     if total == 0 {
         return 1.0;
+    }
+    if len_a == 0 || len_b == 0 {
+        return 0.0;
     }
     let mut avail: HashMap<char, isize> = HashMap::new();
     for ch in b.chars() {
@@ -230,13 +278,35 @@ pub fn sequence_matcher_quick_ratio(a: &str, b: &str) -> f64 {
     }
     let mut matches: usize = 0;
     for ch in a.chars() {
-        let count = avail.entry(ch).or_insert(0);
-        if *count > 0 {
-            matches += 1;
+        if let Some(count) = avail.get_mut(&ch) {
+            if *count > 0 {
+                matches += 1;
+                *count -= 1;
+            }
         }
-        *count -= 1;
     }
     (2.0 * matches as f64) / (total as f64)
+}
+
+/// Return `true` if `sequence_matcher_quick_ratio(a, b) >= threshold`,
+/// using an O(1) length upper bound to reject impossible pairs before counting characters.
+pub fn sequence_matcher_quick_ratio_at_least(a: &str, b: &str, threshold: f64) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        let len_a = a.len();
+        let len_b = b.len();
+        let total = len_a + len_b;
+        if total == 0 {
+            return 1.0 >= threshold;
+        }
+        if len_a == 0 || len_b == 0 {
+            return 0.0 >= threshold;
+        }
+        let min_len = len_a.min(len_b);
+        if (2.0 * min_len as f64) / (total as f64) < threshold {
+            return false;
+        }
+    }
+    sequence_matcher_quick_ratio(a, b) >= threshold
 }
 
 /// POSIX dirname equivalent to `os.path.dirname(p)` on `/`-separated paths.
@@ -579,11 +649,19 @@ fn resolve_new_context(
     // 2. Fallback similarity match against existing fs_file keys (matching contextpatch.py lines 177-190)
     let dir_path = posix_dirname(i);
     if !ordered_fs_entries.is_empty() {
+        let dir_is_ascii = dir_path.is_ascii();
+        let dir_len = dir_path.len();
         for (e, ctx) in ordered_fs_entries {
-            if sequence_matcher_quick_ratio(dir_path, e) >= 0.8 {
-                if e == dir_path {
+            if dir_is_ascii && e.is_ascii() {
+                let min_len = dir_len.min(e.len());
+                if min_len * 10 < 4 * (dir_len + e.len()) {
                     continue;
                 }
+            }
+            if e == dir_path {
+                continue;
+            }
+            if sequence_matcher_quick_ratio_at_least(dir_path, e, 0.8) {
                 return ctx.iter().map(|s| s.replace(' ', "")).collect();
             }
         }
@@ -598,7 +676,7 @@ fn resolve_new_context(
     default_ctx.to_vec()
 }
 
-/// Patch `file_contexts` in memory from pre-scanned partition entries.
+/// Patch `file_contexts` in memory from pre-scanned partition entries (quiet by default).
 /// Returns `(sorted_map_of_path_to_context, added_count)`.
 pub fn context_patch_with_entries(
     ordered_fs: &[(String, Vec<String>)],
@@ -607,7 +685,40 @@ pub fn context_patch_with_entries(
     part_name: &str,
     entries: &[ScannedEntry],
 ) -> (BTreeMap<String, Vec<String>>, usize) {
-    println!("ContextPatcher: Load origin {} entries", fs_map.len());
+    context_patch_with_entries_verbose(ordered_fs, fs_map, dir_path_str, part_name, entries, false)
+}
+
+/// Patch `file_contexts` in memory from pre-scanned partition entries with optional verbose per-entry logging.
+/// Returns `(sorted_map_of_path_to_context, added_count)`.
+pub fn context_patch_with_entries_verbose(
+    ordered_fs: &[(String, Vec<String>)],
+    fs_map: &HashMap<String, Vec<String>>,
+    dir_path_str: &str,
+    part_name: &str,
+    entries: &[ScannedEntry],
+    verbose: bool,
+) -> (BTreeMap<String, Vec<String>>, usize) {
+    context_patch_with_entries_logger(
+        ordered_fs,
+        fs_map,
+        dir_path_str,
+        part_name,
+        entries,
+        verbose,
+        &mut |args| println!("{args}"),
+    )
+}
+
+fn context_patch_with_entries_logger(
+    ordered_fs: &[(String, Vec<String>)],
+    fs_map: &HashMap<String, Vec<String>>,
+    dir_path_str: &str,
+    part_name: &str,
+    entries: &[ScannedEntry],
+    verbose: bool,
+    log: &mut dyn FnMut(std::fmt::Arguments<'_>),
+) -> (BTreeMap<String, Vec<String>>, usize) {
+    log(format_args!("ContextPatcher: Load origin {} entries", fs_map.len()));
 
     let default_ctx = vec![default_partition_context(dir_path_str)];
     let fix_rules = compile_fix_rules();
@@ -668,17 +779,40 @@ pub fn context_patch_with_entries(
 
     let add_new = resolved.len();
     for (path, ctx) in resolved {
-        println!("Add {} {:?}", path, ctx);
+        if verbose {
+            log(format_args!("Add {} {:?}", path, ctx));
+        }
         new_fs.insert(path, ctx);
     }
 
     (new_fs, add_new)
 }
 
-/// Run `contextpatch` on `dir_path` and `file_contexts` file.
+/// Run `contextpatch` on `dir_path` and `file_contexts` file (quiet by default).
 pub fn context_patch_file(dir_path: impl AsRef<Path>, file_contexts: impl AsRef<Path>) -> Result<(BTreeMap<String, Vec<String>>, usize)> {
-    let dir_path_ref = dir_path.as_ref();
-    let file_contexts_ref = file_contexts.as_ref();
+    context_patch_file_verbose(dir_path, file_contexts, false)
+}
+
+/// Run `contextpatch` on `dir_path` and `file_contexts` file with optional verbose per-entry logging.
+pub fn context_patch_file_verbose(
+    dir_path: impl AsRef<Path>,
+    file_contexts: impl AsRef<Path>,
+    verbose: bool,
+) -> Result<(BTreeMap<String, Vec<String>>, usize)> {
+    context_patch_file_with_logger(
+        dir_path.as_ref(),
+        file_contexts.as_ref(),
+        verbose,
+        &mut |args| println!("{args}"),
+    )
+}
+
+fn context_patch_file_with_logger(
+    dir_path_ref: &Path,
+    file_contexts_ref: &Path,
+    verbose: bool,
+    log: &mut dyn FnMut(std::fmt::Arguments<'_>),
+) -> Result<(BTreeMap<String, Vec<String>>, usize)> {
     let dir_path_str = dir_path_ref.to_string_lossy().into_owned();
     let part_name = extract_part_name(dir_path_ref);
 
@@ -687,12 +821,14 @@ pub fn context_patch_file(dir_path: impl AsRef<Path>, file_contexts: impl AsRef<
     let entries = scan_partition_entries(dir_path_ref)
         .with_context(|| format!("Failed to scan directory: {}", dir_path_ref.display()))?;
 
-    let (new_fs, add_new) = context_patch_with_entries(
+    let (new_fs, add_new) = context_patch_with_entries_logger(
         &ordered_fs,
         &fs_map,
         &dir_path_str,
         &part_name,
         &entries,
+        verbose,
+        log,
     );
 
     let mut out = String::with_capacity(new_fs.len() * 64);
@@ -703,7 +839,7 @@ pub fn context_patch_file(dir_path: impl AsRef<Path>, file_contexts: impl AsRef<
         out.push('\n');
     }
     coloros_common::write_text_lf(file_contexts_ref, &out)?;
-    println!("ContextPatcher: Add {} entries", add_new);
+    log(format_args!("ContextPatcher: Add {} entries", add_new));
 
     Ok((new_fs, add_new))
 }
@@ -780,7 +916,7 @@ pub fn compute_fs_config_entry(
     }
 }
 
-/// Patch `fs_config` in memory from pre-scanned partition entries.
+/// Patch `fs_config` in memory from pre-scanned partition entries (quiet by default).
 /// Returns `(sorted_map_of_path_to_config, added_count)`.
 pub fn fs_patch_with_entries(
     fs_map: &HashMap<String, Vec<String>>,
@@ -788,7 +924,37 @@ pub fn fs_patch_with_entries(
     root_exists: bool,
     entries: &[ScannedEntry],
 ) -> (BTreeMap<String, Vec<String>>, usize) {
-    println!("FsPatcher: Load origin {} entries", fs_map.len());
+    fs_patch_with_entries_verbose(fs_map, part_name, root_exists, entries, false)
+}
+
+/// Patch `fs_config` in memory from pre-scanned partition entries with optional verbose per-entry logging.
+/// Returns `(sorted_map_of_path_to_config, added_count)`.
+pub fn fs_patch_with_entries_verbose(
+    fs_map: &HashMap<String, Vec<String>>,
+    part_name: &str,
+    root_exists: bool,
+    entries: &[ScannedEntry],
+    verbose: bool,
+) -> (BTreeMap<String, Vec<String>>, usize) {
+    fs_patch_with_entries_logger(
+        fs_map,
+        part_name,
+        root_exists,
+        entries,
+        verbose,
+        &mut |args| println!("{args}"),
+    )
+}
+
+fn fs_patch_with_entries_logger(
+    fs_map: &HashMap<String, Vec<String>>,
+    part_name: &str,
+    root_exists: bool,
+    entries: &[ScannedEntry],
+    verbose: bool,
+    log: &mut dyn FnMut(std::fmt::Arguments<'_>),
+) -> (BTreeMap<String, Vec<String>>, usize) {
+    log(format_args!("FsPatcher: Load origin {} entries", fs_map.len()));
 
     // Build raw candidate list matching `scan_dir` in `fspatch.py`:
     // 1. `part_name` (root directory of the partition)
@@ -873,7 +1039,9 @@ pub fn fs_patch_with_entries(
             continue;
         }
         let config = compute_fs_config_entry(&i, cand.is_dir, cand.exists, cand.symlink_target);
-        println!("Add [{}{:?}]", i, config);
+        if verbose {
+            log(format_args!("Add [{}{:?}]", i, config));
+        }
         new_add += 1;
         new_fs.insert(i, config);
     }
@@ -881,10 +1049,31 @@ pub fn fs_patch_with_entries(
     (new_fs, new_add)
 }
 
-/// Run `fspatch` on `dir_path` and `fs_config` file.
+/// Run `fspatch` on `dir_path` and `fs_config` file (quiet by default).
 pub fn fs_patch_file(dir_path: impl AsRef<Path>, fs_config: impl AsRef<Path>) -> Result<(BTreeMap<String, Vec<String>>, usize)> {
-    let dir_path_ref = dir_path.as_ref();
-    let fs_config_ref = fs_config.as_ref();
+    fs_patch_file_verbose(dir_path, fs_config, false)
+}
+
+/// Run `fspatch` on `dir_path` and `fs_config` file with optional verbose per-entry logging.
+pub fn fs_patch_file_verbose(
+    dir_path: impl AsRef<Path>,
+    fs_config: impl AsRef<Path>,
+    verbose: bool,
+) -> Result<(BTreeMap<String, Vec<String>>, usize)> {
+    fs_patch_file_with_logger(
+        dir_path.as_ref(),
+        fs_config.as_ref(),
+        verbose,
+        &mut |args| println!("{args}"),
+    )
+}
+
+fn fs_patch_file_with_logger(
+    dir_path_ref: &Path,
+    fs_config_ref: &Path,
+    verbose: bool,
+    log: &mut dyn FnMut(std::fmt::Arguments<'_>),
+) -> Result<(BTreeMap<String, Vec<String>>, usize)> {
     let part_name = extract_part_name(dir_path_ref);
 
     let fs_map = scan_fs(fs_config_ref)
@@ -892,11 +1081,13 @@ pub fn fs_patch_file(dir_path: impl AsRef<Path>, fs_config: impl AsRef<Path>) ->
     let entries = scan_partition_entries(dir_path_ref)
         .with_context(|| format!("Failed to scan directory: {}", dir_path_ref.display()))?;
 
-    let (new_fs, new_add) = fs_patch_with_entries(
+    let (new_fs, new_add) = fs_patch_with_entries_logger(
         &fs_map,
         &part_name,
         dir_path_ref.is_dir(),
         &entries,
+        verbose,
+        log,
     );
 
     let mut out = String::with_capacity(new_fs.len() * 48);
@@ -907,21 +1098,45 @@ pub fn fs_patch_file(dir_path: impl AsRef<Path>, fs_config: impl AsRef<Path>) ->
         out.push('\n');
     }
     coloros_common::write_text_lf(fs_config_ref, &out)?;
-    println!("FsPatcher: Add {} entries", new_add);
+    log(format_args!("FsPatcher: Add {} entries", new_add));
 
     Ok((new_fs, new_add))
 }
 
-/// Single-pass combined `fs_config` and `file_contexts` patching.
+/// Single-pass combined `fs_config` and `file_contexts` patching (quiet by default).
 /// Walks the directory tree once in parallel and updates both configuration files.
 pub fn patch_all_files(
     dir_path: impl AsRef<Path>,
     fs_config: impl AsRef<Path>,
     file_contexts: impl AsRef<Path>,
 ) -> Result<()> {
-    let dir_path_ref = dir_path.as_ref();
-    let fs_config_ref = fs_config.as_ref();
-    let file_contexts_ref = file_contexts.as_ref();
+    patch_all_files_verbose(dir_path, fs_config, file_contexts, false)
+}
+
+/// Single-pass combined `fs_config` and `file_contexts` patching with optional verbose per-entry logging.
+/// Walks the directory tree once in parallel and updates both configuration files.
+pub fn patch_all_files_verbose(
+    dir_path: impl AsRef<Path>,
+    fs_config: impl AsRef<Path>,
+    file_contexts: impl AsRef<Path>,
+    verbose: bool,
+) -> Result<()> {
+    patch_all_files_with_logger(
+        dir_path.as_ref(),
+        fs_config.as_ref(),
+        file_contexts.as_ref(),
+        verbose,
+        &mut |args| println!("{args}"),
+    )
+}
+
+fn patch_all_files_with_logger(
+    dir_path_ref: &Path,
+    fs_config_ref: &Path,
+    file_contexts_ref: &Path,
+    verbose: bool,
+    log: &mut dyn FnMut(std::fmt::Arguments<'_>),
+) -> Result<()> {
     let dir_path_str = dir_path_ref.to_string_lossy().into_owned();
     let part_name = extract_part_name(dir_path_ref);
 
@@ -932,11 +1147,13 @@ pub fn patch_all_files(
     // 1. Patch fs_config
     let fs_map = scan_fs(fs_config_ref)
         .with_context(|| format!("Failed to scan fs_config: {}", fs_config_ref.display()))?;
-    let (new_fs, fs_added) = fs_patch_with_entries(
+    let (new_fs, fs_added) = fs_patch_with_entries_logger(
         &fs_map,
         &part_name,
         dir_path_ref.is_dir(),
         &entries,
+        verbose,
+        log,
     );
     let mut fs_out = String::with_capacity(new_fs.len() * 48);
     for (k, v) in &new_fs {
@@ -946,17 +1163,19 @@ pub fn patch_all_files(
         fs_out.push('\n');
     }
     coloros_common::write_text_lf(fs_config_ref, &fs_out)?;
-    println!("FsPatcher: Add {} entries", fs_added);
+    log(format_args!("FsPatcher: Add {} entries", fs_added));
 
     // 2. Patch file_contexts
     let (ordered_ctx, ctx_map) = scan_context(file_contexts_ref)
         .with_context(|| format!("Failed to scan file_contexts: {}", file_contexts_ref.display()))?;
-    let (new_ctx, ctx_added) = context_patch_with_entries(
+    let (new_ctx, ctx_added) = context_patch_with_entries_logger(
         &ordered_ctx,
         &ctx_map,
         &dir_path_str,
         &part_name,
         &entries,
+        verbose,
+        log,
     );
     let mut ctx_out = String::with_capacity(new_ctx.len() * 64);
     for (k, v) in &new_ctx {
@@ -966,7 +1185,7 @@ pub fn patch_all_files(
         ctx_out.push('\n');
     }
     coloros_common::write_text_lf(file_contexts_ref, &ctx_out)?;
-    println!("ContextPatcher: Add {} entries", ctx_added);
+    log(format_args!("ContextPatcher: Add {} entries", ctx_added));
 
     Ok(())
 }
@@ -1215,6 +1434,234 @@ mod tests {
             &vec!["0", "0", "0755"]
         );
         assert_eq!(new_fs.get("/system/").unwrap(), &vec!["0", "0", "0755"]);
+
+        Ok(())
+    }
+
+    fn reference_quick_ratio(a: &str, b: &str) -> f64 {
+        let len_a = a.chars().count();
+        let len_b = b.chars().count();
+        let total = len_a + len_b;
+        if total == 0 {
+            return 1.0;
+        }
+        let mut avail: HashMap<char, isize> = HashMap::new();
+        for ch in b.chars() {
+            *avail.entry(ch).or_insert(0) += 1;
+        }
+        let mut matches: usize = 0;
+        for ch in a.chars() {
+            let count = avail.entry(ch).or_insert(0);
+            if *count > 0 {
+                matches += 1;
+            }
+            *count -= 1;
+        }
+        (2.0 * matches as f64) / (total as f64)
+    }
+
+    #[test]
+    fn test_sequence_matcher_quick_ratio_parity_and_at_least() {
+        let cases = [
+            ("", ""),
+            ("", "/system"),
+            ("/system", ""),
+            ("a", "a"),
+            ("ab", "abc"),
+            ("ab", "abxyz"),
+            ("abcdef", "abcdefghi"),
+            ("/system/system/bin", "/system/system/bin/sh"),
+            ("/system/app", "/vendor/firmware_mnt/image"),
+            ("/odm/etc/camera/config", "/odm/etc/camera/config/cam.json"),
+            ("aaaaaa", "aaabbb"),
+            ("xyz123", "123xyz"),
+            ("short", "a_much_longer_path_that_fails_bound"),
+            ("/system/путь", "/system/путь/файл"),
+            ("ascii_path", "не_ascii_путь"),
+            ("проверка", "проверка"),
+        ];
+
+        for &(a, b) in &cases {
+            let expected = reference_quick_ratio(a, b);
+            let actual = sequence_matcher_quick_ratio(a, b);
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "parity mismatch for ({a:?}, {b:?}): actual={actual}, expected={expected}"
+            );
+            assert_eq!(
+                sequence_matcher_quick_ratio_at_least(a, b, 0.8),
+                expected >= 0.8,
+                "at_least(0.8) mismatch for ({a:?}, {b:?}): ratio={expected}"
+            );
+            assert_eq!(
+                sequence_matcher_quick_ratio_at_least(a, b, 0.0),
+                expected >= 0.0,
+                "at_least(0.0) mismatch for ({a:?}, {b:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cli_quiet_default_vs_verbose_context_patch() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let vendor_dir = tmp.path().join("vendor");
+        fs::create_dir_all(vendor_dir.join("etc"))?;
+        fs::write(vendor_dir.join("etc/test.conf"), "ok")?;
+
+        let fc_quiet = tmp.path().join("fc_quiet");
+        fs::write(&fc_quiet, "/ u:object_r:rootfs:s0\n")?;
+        let cli_quiet = Cli::try_parse_from([
+            "rom-fs-patcher",
+            "context-patch",
+            vendor_dir.to_str().unwrap(),
+            fc_quiet.to_str().unwrap(),
+        ])?;
+        assert!(!cli_quiet.verbose);
+        let mut quiet_logs = Vec::new();
+        run_cli_with_logger(cli_quiet, &mut |args| quiet_logs.push(args.to_string()))?;
+        assert!(quiet_logs
+            .iter()
+            .any(|l| l == "ContextPatcher: Load origin 1 entries"));
+        assert!(quiet_logs
+            .iter()
+            .any(|l| l.starts_with("ContextPatcher: Add ")));
+        assert!(quiet_logs.iter().any(|l| l == "Done!"));
+        assert!(
+            !quiet_logs.iter().any(|l| l.starts_with("Add ")),
+            "default quiet mode must not emit per-entry Add lines: {:?}",
+            quiet_logs
+        );
+
+        let fc_verbose = tmp.path().join("fc_verbose");
+        fs::write(&fc_verbose, "/ u:object_r:rootfs:s0\n")?;
+        let cli_verbose = Cli::try_parse_from([
+            "rom-fs-patcher",
+            "context-patch",
+            vendor_dir.to_str().unwrap(),
+            fc_verbose.to_str().unwrap(),
+            "-v",
+        ])?;
+        assert!(cli_verbose.verbose);
+        let mut verbose_logs = Vec::new();
+        run_cli_with_logger(cli_verbose, &mut |args| verbose_logs.push(args.to_string()))?;
+        assert!(verbose_logs
+            .iter()
+            .any(|l| l.starts_with("Add /vendor/")));
+        assert!(verbose_logs
+            .iter()
+            .any(|l| l == "ContextPatcher: Load origin 1 entries"));
+        assert!(verbose_logs
+            .iter()
+            .any(|l| l.starts_with("ContextPatcher: Add ")));
+        assert!(verbose_logs.iter().any(|l| l == "Done!"));
+        assert_eq!(fs::read_to_string(&fc_quiet)?, fs::read_to_string(&fc_verbose)?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cli_quiet_default_vs_verbose_fs_patch_and_patch_all() -> Result<()> {
+        let tmp = TempDir::new()?;
+        let sys_dir = tmp.path().join("system");
+        fs::create_dir_all(sys_dir.join("bin"))?;
+        fs::write(sys_dir.join("bin/tool"), "elf")?;
+
+        // 1. FsPatch quiet vs --verbose (before subcommand)
+        let fsc_quiet = tmp.path().join("fsc_quiet");
+        fs::write(&fsc_quiet, "/ 0 0 0755\n")?;
+        let cli_fs_quiet = Cli::try_parse_from([
+            "rom-fs-patcher",
+            "fs-patch",
+            sys_dir.to_str().unwrap(),
+            fsc_quiet.to_str().unwrap(),
+        ])?;
+        let mut fs_quiet_logs = Vec::new();
+        run_cli_with_logger(cli_fs_quiet, &mut |args| fs_quiet_logs.push(args.to_string()))?;
+        assert!(fs_quiet_logs
+            .iter()
+            .any(|l| l == "FsPatcher: Load origin 1 entries"));
+        assert!(fs_quiet_logs.iter().any(|l| l.starts_with("FsPatcher: Add ")));
+        assert!(fs_quiet_logs.iter().any(|l| l == "Done!"));
+        assert!(
+            !fs_quiet_logs.iter().any(|l| l.starts_with("Add ")),
+            "fs-patch quiet mode must not emit per-entry Add lines: {:?}",
+            fs_quiet_logs
+        );
+
+        let fsc_verbose = tmp.path().join("fsc_verbose");
+        fs::write(&fsc_verbose, "/ 0 0 0755\n")?;
+        let cli_fs_verbose = Cli::try_parse_from([
+            "rom-fs-patcher",
+            "--verbose",
+            "fs-patch",
+            sys_dir.to_str().unwrap(),
+            fsc_verbose.to_str().unwrap(),
+        ])?;
+        assert!(cli_fs_verbose.verbose);
+        let mut fs_verbose_logs = Vec::new();
+        run_cli_with_logger(cli_fs_verbose, &mut |args| {
+            fs_verbose_logs.push(args.to_string())
+        })?;
+        assert!(fs_verbose_logs.iter().any(|l| l.starts_with("Add [system/bin/tool")));
+        assert_eq!(
+            fs::read_to_string(&fsc_quiet)?,
+            fs::read_to_string(&fsc_verbose)?
+        );
+
+        // 2. PatchAll quiet vs --verbose (after subcommand)
+        let all_fsc_quiet = tmp.path().join("all_fsc_quiet");
+        let all_fc_quiet = tmp.path().join("all_fc_quiet");
+        fs::write(&all_fsc_quiet, "/ 0 0 0755\n")?;
+        fs::write(&all_fc_quiet, "/ u:object_r:rootfs:s0\n")?;
+        let cli_all_quiet = Cli::try_parse_from([
+            "rom-fs-patcher",
+            "patch-all",
+            sys_dir.to_str().unwrap(),
+            all_fsc_quiet.to_str().unwrap(),
+            all_fc_quiet.to_str().unwrap(),
+        ])?;
+        let mut all_quiet_logs = Vec::new();
+        run_cli_with_logger(cli_all_quiet, &mut |args| {
+            all_quiet_logs.push(args.to_string())
+        })?;
+        assert!(all_quiet_logs.iter().any(|l| l.starts_with("FsPatcher: Add ")));
+        assert!(all_quiet_logs
+            .iter()
+            .any(|l| l.starts_with("ContextPatcher: Add ")));
+        assert!(all_quiet_logs.iter().any(|l| l == "Done!"));
+        assert!(!all_quiet_logs.iter().any(|l| l.starts_with("Add ")));
+
+        let all_fsc_verbose = tmp.path().join("all_fsc_verbose");
+        let all_fc_verbose = tmp.path().join("all_fc_verbose");
+        fs::write(&all_fsc_verbose, "/ 0 0 0755\n")?;
+        fs::write(&all_fc_verbose, "/ u:object_r:rootfs:s0\n")?;
+        let cli_all_verbose = Cli::try_parse_from([
+            "rom-fs-patcher",
+            "patch-all",
+            sys_dir.to_str().unwrap(),
+            all_fsc_verbose.to_str().unwrap(),
+            all_fc_verbose.to_str().unwrap(),
+            "--verbose",
+        ])?;
+        assert!(cli_all_verbose.verbose);
+        let mut all_verbose_logs = Vec::new();
+        run_cli_with_logger(cli_all_verbose, &mut |args| {
+            all_verbose_logs.push(args.to_string())
+        })?;
+        assert!(all_verbose_logs
+            .iter()
+            .any(|l| l.starts_with("Add [system/bin/tool")));
+        assert!(all_verbose_logs
+            .iter()
+            .any(|l| l.starts_with("Add /system/bin/tool")));
+        assert_eq!(
+            fs::read_to_string(&all_fsc_quiet)?,
+            fs::read_to_string(&all_fsc_verbose)?
+        );
+        assert_eq!(
+            fs::read_to_string(&all_fc_quiet)?,
+            fs::read_to_string(&all_fc_verbose)?
+        );
 
         Ok(())
     }

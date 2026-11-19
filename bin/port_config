@@ -22,6 +22,10 @@ pack_with_dsu=false
 # Packaging method: ota (default, recovery package with payload.bin) or fastboot (fastboot flashable package with super.zst and flash scripts)
 pack_method=ota
 
+# Concurrent partition packing: auto (up to 2, reduced on low-memory hosts),
+# or 1..32. PORT_PACK_JOBS overrides this setting; 1 keeps packing sequential.
+pack_jobs=auto
+
 #ddr_type=ddr5
 
 #给其他机型移植时，已近处理过的包，可以复用，不用再处理。

@@ -90,13 +90,22 @@ jobs:
           fi
 
       - name: Install dependencies
+        env:
+          BASE_INPUT: ${{ inputs.base_rom_url }}
+          PORT_INPUT: ${{ inputs.port_rom_url }}
+          SECOND_PORT_INPUT: ${{ inputs.second_port_rom_url }}
         run: |
           sudo apt-get update
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             aria2 python3 busybox zip unzip p7zip-full openjdk-21-jre-headless \
             zstd bc android-sdk-libsparse-utils xmlstarlet dos2unix python3-requests python3-tqdm python3-pip
-          python3 -m pip install playwright --break-system-packages || python3 -m pip install playwright
-          python3 -m playwright install --with-deps chromium
+          # Direct ROM URLs need no browser. Install it only for model-name
+          # queries handled by fetch_rom_url.py's Playwright resolver.
+          source functions.sh
+          if port_requires_browser "$BASE_INPUT" "$PORT_INPUT" "$SECOND_PORT_INPUT"; then
+            python3 -m pip install playwright --break-system-packages || python3 -m pip install playwright
+            python3 -m playwright install --with-deps chromium
+          fi
           echo 'JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64' >> "$GITHUB_ENV"
           echo '/usr/lib/jvm/java-21-openjdk-amd64/bin' >> "$GITHUB_PATH"
           for cargo_bin_dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin"; do
@@ -114,7 +123,9 @@ jobs:
               ln -sf coloros-tools "bin/Linux/x86_64/${tool}"
             done
           fi
-          bash -n port.sh functions.sh
+          for script in port.sh functions.sh bin/port_performance.sh; do
+            bash -n "$script"
+          done
           java -version
           printf '%s  %s\n' dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423 bin/apktool/apktool.jar | sha256sum -c -
           java -jar bin/apktool/apktool.jar --version

@@ -40,6 +40,11 @@ sudo ./setup.sh
 sudo ./port.sh /path/to/base-rom /path/to/port-rom
 ```
 
+Partition packing uses up to two jobs automatically. Set `PORT_PACK_JOBS=1`
+for sequential packing, or a value from 1 to 32 to tune concurrency.
+See [performance settings](docs/PERFORMANCE.md) (Russian) for cache behavior,
+resource limits, and packing logs.
+
 Use base and port packages that you are authorized to obtain. Back up important data and verify the target device, partition layout, and flashing method first; mistakes can cause data loss or leave a device unable to boot. Do not upload full ROM packages, keys, device serial numbers, or other personal data in an issue.
 
 ## GitHub Actions

@@ -513,6 +513,41 @@ get_smali_class_dirs() {
     done | awk '!seen[$0]++'
 }
 
+_port::run_apkeditor() {
+    if [[ "${PORT_VERBOSE:-false}" == "true" ]]; then
+        java -jar "$@"
+        return $?
+    fi
+    local log_file=""
+    local rc=0
+    log_file="$(mktemp "${TMPDIR:-/tmp}/apkeditor.XXXXXX")" || {
+        java -jar "$@"
+        return $?
+    }
+    java -jar "$@" >"${log_file}" 2>&1 || rc=$?
+    if [[ ${rc} -ne 0 ]]; then
+        local err_tail=""
+        err_tail="$(tr '\r' '\n' < "${log_file}" | grep -Ev '^[[:space:]]*$|Encoding:[[:space:]]|^(\[?(DECOMPILE|BUILD)\]?[[:space:]]+)?(Decoding|Writing|Copying|Loading|Parsing|Adding|Packing|Compiling|Merging|Scanning|Reading)[[:space:]:]' | tail -n 80)"
+        if [[ -n "${err_tail}" ]]; then
+            printf '%s\n' "${err_tail}" >&2
+        else
+            tr '\r' '\n' < "${log_file}" | tail -n 40 >&2
+        fi
+        rm -f -- "${log_file}"
+        return "${rc}"
+    fi
+    tr '\r' '\n' < "${log_file}" | awk '
+        /^[[:space:]]*$/ { next }
+        /Encoding:[[:space:]]/ { next }
+        /^(\[?(DECOMPILE|BUILD)\]?[[:space:]]+)?(Decoding|Writing|Copying|Loading|Parsing|Adding|Packing|Compiling|Merging|Scanning|Reading)[[:space:]:]/ { next }
+        /^[[:space:]]*[0-9]+([.][0-9]+)?%([[:space:]]|$)/ { next }
+        /^[[:space:]]*\[[=#>.* -]+\]/ { next }
+        { print }
+    '
+    rm -f -- "${log_file}"
+    return 0
+}
+
 apk_decode() {
     local input_file="$1"
     local output_dir="$2"
@@ -576,7 +611,7 @@ apk_decode() {
             java -jar bin/apktool/apktool.jar d -f "${input_file}" -o "${output_dir}" "${apktool_args[@]}" || return 1
             ;;
         apkeditor|*)
-            java -jar bin/apktool/APKEditor.jar d -f -i "${input_file}" -o "${output_dir}" "${args[@]}" || return 1
+            _port::run_apkeditor bin/apktool/APKEditor.jar d -f -i "${input_file}" -o "${output_dir}" "${args[@]}" || return 1
             ;;
     esac
 
@@ -633,7 +668,7 @@ apk_build() {
             java -jar bin/apktool/apktool.jar b -f "${input_dir}" -o "${output_file}" "${apktool_args[@]}" || return 1
             ;;
         apkeditor|*)
-            java -jar bin/apktool/APKEditor.jar b -f -i "${input_dir}" -o "${output_file}" "${args[@]}" || return 1
+            _port::run_apkeditor bin/apktool/APKEditor.jar b -f -i "${input_dir}" -o "${output_file}" "${args[@]}" || return 1
             ;;
     esac
 }
@@ -763,7 +798,7 @@ patch_kernel() {
     # Replace the dtb when one was unpacked (Android 10 and earlier).
     if [[ -f dtb ]] && [[ -n $dtb_file ]]; then
         blue "检测到 dtb 文件" "替换 boot.img 中的 dtb 文件"
-        cp -fv "$dtb_file" "${tmp_dir}/dtb"
+        cp -f "$dtb_file" "${tmp_dir}/dtb"
     fi
 
     # Check the ramdisk for fstab files (fstab.qcom, fstab.default, fstab.emmc).
@@ -841,7 +876,7 @@ patch_kernel() {
         # Replace the dtb inside vendor_boot (when present).
         if [ -f dtb ]; then
             blue "替换 dtb 文件" "Replacing dtb"
-            cp -fv "$dtb_file" "${vendor_boot_tmp}/dtb"
+            cp -f "$dtb_file" "${vendor_boot_tmp}/dtb"
         fi
 
         # Check the vendor_boot ramdisk for fstab files.
@@ -1319,6 +1354,9 @@ patch_kernel_to_bootimg() {
 # its historical build/<version>/ layout, while these helpers add a source
 # digest sidecar so a different archive with the same version name can never be
 # mistaken for a valid cache hit.
+source "$(dirname "${BASH_SOURCE[0]}")/bin/port_performance.sh" || return 1
+source "$(dirname "${BASH_SOURCE[0]}")/bin/systemui_color_compat.sh" || return 1
+
 port_sha256_file() {
     local file="${1:-}"
     local output=""
@@ -1341,17 +1379,6 @@ port_file_size_bytes() {
     else
         stat -c%s "${file}"
     fi
-}
-
-port_tree_size_bytes() {
-    local root="${1:-}"
-    local file size total=0
-    [[ -d "${root}" ]] || return 1
-    while IFS= read -r -d '' file; do
-        size="$(port_file_size_bytes "${file}")" || return 1
-        total=$((total + size))
-    done < <(find "${root}" -type f -print0)
-    printf '%s\n' "${total}"
 }
 
 port_rom_fingerprint() {
@@ -1380,6 +1407,9 @@ port_cache_has_images() {
 }
 
 port_cache_store_images() {
+    # CI removes this cache immediately after extraction. Do not write a
+    # second multi-gigabyte copy only to delete it in the same run.
+    [[ "${PORT_LOW_DISK:-false}" != true ]] || return 0
     local dir="${1:-}"
     local source_dir="${2:-}"
     local hash="${3:-}"
@@ -1391,7 +1421,7 @@ port_cache_store_images() {
     mkdir -p "${dir}" || return 1
     for image in "${source_dir}"/*.img; do
         [[ -s "${image}" ]] || continue
-        cp -f -- "${image}" "${dir}/" || return 1
+        port_copy_image "${image}" "${dir}/${image##*/}" || return 1
         image_count=$((image_count + 1))
     done
     # Do not publish an apparently valid sidecar for an empty extraction.  A
@@ -1421,13 +1451,38 @@ _port::pack_partition_erofs() {
     local file_ctx="$4"
     local out_img="$5"
     local tmp_img="${out_img}.tmp.$$"
-    rm -f -- "${tmp_img}"
-    if ! mkfs.erofs -zlz4hc,12 --mount-point "${pname}" \
-        --fs-config-file "${fs_cfg}" \
-        --file-contexts "${file_ctx}" \
-        -T 1648635685 "${tmp_img}" "${src_dir}"; then
-        rm -f -- "${tmp_img}"
-        return 1
+    local log_file="${tmp_img}.log"
+    local rc=0
+    local -a worker_args=()
+    [[ -z "${PORT_EROFS_WORKERS:-}" ]] || worker_args+=("--workers=${PORT_EROFS_WORKERS}")
+    rm -f -- "${tmp_img}" "${log_file}"
+    if [[ "${PORT_VERBOSE:-false}" == "true" ]]; then
+        mkfs.erofs "${worker_args[@]}" -zlz4hc,12 --mount-point "${pname}" \
+            --fs-config-file "${fs_cfg}" \
+            --file-contexts "${file_ctx}" \
+            -T 1648635685 "${tmp_img}" "${src_dir}" || rc=$?
+    else
+        mkfs.erofs "${worker_args[@]}" -zlz4hc,12 --mount-point "${pname}" \
+            --fs-config-file "${fs_cfg}" \
+            --file-contexts "${file_ctx}" \
+            -T 1648635685 "${tmp_img}" "${src_dir}" >"${log_file}" 2>&1 || rc=$?
+        if [[ ${rc} -ne 0 ]]; then
+            local err_tail=""
+            err_tail="$(grep -Ev '^[[:space:]]*Processing ' "${log_file}" | tail -n 80)"
+            if [[ -n "${err_tail}" ]]; then
+                printf '%s\n' "${err_tail}" >&2
+            else
+                tail -n 40 "${log_file}" >&2
+            fi
+            rm -f -- "${tmp_img}" "${log_file}"
+            return "${rc}"
+        fi
+        grep -Ev '^[[:space:]]*Processing |^[[:space:]]*$' "${log_file}" || true
+        rm -f -- "${log_file}"
+    fi
+    if [[ ${rc} -ne 0 ]]; then
+        rm -f -- "${tmp_img}" "${log_file}"
+        return "${rc}"
     fi
     [[ -s "${tmp_img}" ]] || { rm -f -- "${tmp_img}"; return 1; }
     mv -f -- "${tmp_img}" "${out_img}"
@@ -3289,7 +3344,7 @@ _port::stage_postdata_compat() {
     unsigned_apk="${private_tmp}/OplusWifiResource-unsigned.apk"
     signed_apk="${private_tmp}/OplusWifiResource-signed.apk"
 
-    if ! java -jar "${apkeditor_jar}" d -f -t xml \
+    if ! _port::run_apkeditor "${apkeditor_jar}" d -f -t xml \
         -i "${wifi_rro}" -o "${decoded_dir}" \
         -framework "${framework_res}" -framework "${oplus_framework_res}"; then
         error "使用 APKEditor 解码 OplusWifiResource.apk 失败" \
@@ -3313,7 +3368,7 @@ _port::stage_postdata_compat() {
         return 1
     fi
 
-    if ! java -jar "${apkeditor_jar}" b -f \
+    if ! _port::run_apkeditor "${apkeditor_jar}" b -f \
         -i "${decoded_dir}" -o "${unsigned_apk}" \
         -framework "${framework_res}" -framework "${oplus_framework_res}"; then
         error "使用 APKEditor 重编译 OplusWifiResource.apk 失败" \

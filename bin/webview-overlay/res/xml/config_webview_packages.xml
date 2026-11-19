@@ -1,0 +1,4 @@
+<webviewproviders>
+    <webviewprovider description="Android System WebView"
+        packageName="com.google.android.webview" availableByDefault="true" />
+</webviewproviders>
