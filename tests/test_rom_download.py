@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = b'0123456789abcdef' * (2 * 1024 * 1024 + 1)
 
 
-@unittest.skipUnless(shutil.which('aria2c'), 'aria2c is not installed')
+@unittest.skipUnless(shutil.which('aria2c') and shutil.which('bash'), 'aria2c and bash are required')
 class RomDownloadTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

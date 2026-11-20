@@ -11,9 +11,9 @@ if [ "$(uname -m)" == "x86_64" ] && [  "$(uname)" == "Linux" ];then
     echo "Device arch: Linux x86_64"
     apt update -y
     apt upgrade -y
-    apt install -y aria2 python3 python3-requests python3-tqdm busybox zip unzip p7zip-full openjdk-21-jre zstd bc android-sdk-libsparse-utils xmlstarlet
+    apt install -y aria2 python3 python3-requests python3-tqdm busybox zip unzip p7zip-full openjdk-21-jre zstd bc android-sdk-libsparse-utils xmlstarlet jq dos2unix
     if [ $? -ne 0 ];then
-        echo "安装可能出错，请手动执行：apt install -y aria2 python3 busybox zip unzip p7zip-full openjdk-21-jre zstd bc xmlstarlet"
+        echo "安装可能出错，请手动执行：apt install -y aria2 python3 busybox zip unzip p7zip-full openjdk-21-jre zstd bc xmlstarlet jq dos2unix"
     fi
 fi
 
@@ -21,11 +21,11 @@ if [ "$(uname -m)" == "aarch64" ];then
     echo "Device arch: aarch64"
     apt update -y
     apt upgrade -y
-    apt install -y python python-requests python-tqdm busybox zip unzip p7zip openjdk-21 zipalign zstd xmlstarlet
+    apt install -y python python-requests python-tqdm busybox zip unzip p7zip openjdk-21 zipalign zstd xmlstarlet jq dos2unix
 fi
 
 if [ "$(uname)" == "Darwin" ] && [ "$(uname -m)" == "x86_64" ];then
     echo "Devcie arch: MacOS X86_X64"
     pip3 install requests tqdm
-    brew install aria2 openjdk zstd coreutils gdu gnu-sed gnu-getopt grep xmlstarlet
+    brew install aria2 openjdk zstd coreutils gdu gnu-sed gnu-getopt grep xmlstarlet jq dos2unix
 fi

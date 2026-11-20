@@ -174,8 +174,10 @@ dependencies = [
  "dex-patcher",
  "prop-tool",
  "rom-fs-patcher",
+ "rom-ops",
  "smali-patcher",
  "tempfile",
+ "xml-tool",
 ]
 
 [[package]]
@@ -467,6 +469,7 @@ dependencies = [
  "anyhow",
  "clap",
  "coloros-common",
+ "rayon",
  "regex",
  "tempfile",
  "thiserror",
@@ -549,6 +552,18 @@ dependencies = [
  "regex",
  "tempfile",
  "thiserror",
+ "walkdir",
+]
+
+[[package]]
+name = "rom-ops"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "coloros-common",
+ "rayon",
+ "tempfile",
  "walkdir",
 ]
 
@@ -724,6 +739,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "xml-tool"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "coloros-common",
+ "rayon",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]

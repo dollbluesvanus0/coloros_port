@@ -1,7 +1,9 @@
 """Tests for APK Protection patch in framework.jar."""
 
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -36,7 +38,7 @@ class ApkProtectionTests(unittest.TestCase):
             apk_smali.write_text(SAMPLE_APK_SIGNATURE_VERIFIER, encoding="utf-8")
 
             res = subprocess.run(
-                ["python3", str(ROOT / "bin" / "patch_apk_protection.py"), str(root)],
+                [sys.executable, str(ROOT / "bin" / "patch_apk_protection.py"), str(root)],
                 capture_output=True,
                 text=True,
             )
@@ -48,6 +50,7 @@ class ApkProtectionTests(unittest.TestCase):
             self.assertIn("const/4 v0, 0x1", verifier_content)
             self.assertIn("const/4 p3, 0x0", verifier_content)
 
+    @unittest.skipUnless(shutil.which("java"), "java is not installed")
     def test_patched_smali_assembles_with_smali_jar(self):
         smali_jar = ROOT / "bin" / "apktool" / "smali-3.0.5.jar"
         if not smali_jar.is_file():
@@ -61,7 +64,7 @@ class ApkProtectionTests(unittest.TestCase):
             (src_dir / "ApkSignatureVerifier.smali").write_text(SAMPLE_APK_SIGNATURE_VERIFIER, encoding="utf-8")
 
             subprocess.run(
-                ["python3", str(ROOT / "bin" / "patch_apk_protection.py"), str(src_dir)],
+                [sys.executable, str(ROOT / "bin" / "patch_apk_protection.py"), str(src_dir)],
                 check=True,
                 capture_output=True,
             )
@@ -84,7 +87,7 @@ class ApkProtectionTests(unittest.TestCase):
             empty_dir = Path(td) / "empty"
             empty_dir.mkdir()
             res = subprocess.run(
-                ["python3", str(ROOT / "bin" / "patch_apk_protection.py"), str(empty_dir)],
+                [sys.executable, str(ROOT / "bin" / "patch_apk_protection.py"), str(empty_dir)],
                 capture_output=True,
                 text=True,
             )

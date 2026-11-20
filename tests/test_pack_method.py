@@ -1,6 +1,7 @@
 """Tests for firmware pack_method (OTA vs Fastboot) resolution and configuration."""
 
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipUnless(shutil.which("bash"), "bash is not installed")
 class PackMethodTests(unittest.TestCase):
     def resolve_pack_method(self, pack_method_env=None, config_val=None):
         """Helper to invoke port.sh pack_method resolution logic in a bash subshell."""

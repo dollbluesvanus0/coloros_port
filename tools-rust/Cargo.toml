@@ -6,6 +6,8 @@ members = [
     "crates/dex-patcher",
     "crates/smali-patcher",
     "crates/prop-tool",
+    "crates/xml-tool",
+    "crates/rom-ops",
 ]
 
 [workspace.package]
@@ -34,6 +36,8 @@ rom-fs-patcher = { path = "crates/rom-fs-patcher" }
 dex-patcher = { path = "crates/dex-patcher" }
 smali-patcher = { path = "crates/smali-patcher" }
 prop-tool = { path = "crates/prop-tool" }
+xml-tool = { path = "crates/xml-tool" }
+rom-ops = { path = "crates/rom-ops" }
 
 [package]
 name = "coloros-tools"
@@ -55,6 +59,8 @@ rom-fs-patcher.workspace = true
 dex-patcher.workspace = true
 smali-patcher.workspace = true
 prop-tool.workspace = true
+xml-tool.workspace = true
+rom-ops.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

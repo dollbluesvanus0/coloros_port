@@ -89,6 +89,18 @@ jobs:
             exit 1
           fi
 
+      - name: Cache Cargo build for coloros-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            tools-rust/target
+          key: ${{ runner.os }}-${{ runner.arch }}-coloros-tools-${{ hashFiles('tools-rust/Cargo.lock', 'tools-rust/Cargo.toml', 'tools-rust/crates/*/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-coloros-tools-
+
       - name: Install dependencies
         env:
           BASE_INPUT: ${{ inputs.base_rom_url }}
@@ -98,7 +110,7 @@ jobs:
           sudo apt-get update
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             aria2 python3 busybox zip unzip p7zip-full openjdk-21-jre-headless \
-            zstd bc android-sdk-libsparse-utils xmlstarlet dos2unix python3-requests python3-tqdm python3-pip
+            zstd bc jq android-sdk-libsparse-utils xmlstarlet dos2unix python3-requests python3-tqdm python3-pip
           # Direct ROM URLs need no browser. Install it only for model-name
           # queries handled by fetch_rom_url.py's Playwright resolver.
           source functions.sh
@@ -119,11 +131,11 @@ jobs:
             cargo build --release --manifest-path tools-rust/Cargo.toml
             mkdir -p bin/Linux/x86_64
             cp -f tools-rust/target/release/coloros-tools bin/Linux/x86_64/coloros-tools
-            for tool in rom-fs-patcher dex-patcher smali-patcher prop-tool; do
+            for tool in rom-fs-patcher dex-patcher smali-patcher prop-tool xml-tool rom-ops; do
               ln -sf coloros-tools "bin/Linux/x86_64/${tool}"
             done
           fi
-          for script in port.sh functions.sh bin/port_performance.sh; do
+          for script in port.sh functions.sh setup.sh bin/port_performance.sh bin/systemui_color_compat.sh bin/getSuperSize.sh; do
             bash -n "$script"
           done
           java -version

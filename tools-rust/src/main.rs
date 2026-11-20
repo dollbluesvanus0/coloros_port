@@ -36,6 +36,12 @@ enum Commands {
     /// Stage 4: Batch build.prop and fstab processor
     #[command(visible_aliases = ["proptool"])]
     PropTool(prop_tool::Cli),
+    /// Stage 5: Batch XML feature and config processor
+    #[command(visible_aliases = ["xmltool"])]
+    XmlTool(xml_tool::Cli),
+    /// Stage 6: Native ROM ops (tree-size, debloat, patch-vbmeta, strip-non-ascii)
+    #[command(visible_aliases = ["romops"])]
+    RomOps(rom_ops::Cli),
 }
 
 /// Dispatch CLI invocation from an arbitrary argument iterator (`argv[0..n]`).
@@ -107,6 +113,14 @@ where
                 let sub = prop_tool::Cli::try_parse_from(&args_vec)?;
                 return prop_tool::run_cli(sub);
             }
+            "xml-tool" | "xmltool" => {
+                let sub = xml_tool::Cli::try_parse_from(&args_vec)?;
+                return xml_tool::run_cli(sub);
+            }
+            "rom-ops" | "romops" => {
+                let sub = rom_ops::Cli::try_parse_from(&args_vec)?;
+                return rom_ops::run_cli(sub);
+            }
             _ => {}
         }
     }
@@ -117,6 +131,8 @@ where
         Commands::DexPatcher(sub) => dex_patcher::run_cli(sub),
         Commands::SmaliPatcher(sub) => smali_patcher::run_cli(sub),
         Commands::PropTool(sub) => prop_tool::run_cli(sub),
+        Commands::XmlTool(sub) => xml_tool::run_cli(sub),
+        Commands::RomOps(sub) => rom_ops::run_cli(sub),
     }
 }
 
@@ -249,5 +265,60 @@ mod tests {
         let err2 = run_from_args(["dex-patcher", "--help"]).unwrap_err();
         let clap_err2 = err2.downcast_ref::<clap::Error>().unwrap();
         assert_eq!(clap_err2.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn test_dispatcher_xml_tool_and_rom_ops_multicall() {
+        let dir = tempdir().unwrap();
+        let port_etc = dir.path().join("my_product/etc");
+        fs::create_dir_all(&port_etc).unwrap();
+
+        run_from_args([
+            "coloros-tools",
+            "xml-tool",
+            "add-features",
+            "--port-dir",
+            port_etc.to_str().unwrap(),
+            "--type",
+            "oplus_feature",
+            "oplus.software.test^test_comment",
+        ])
+        .unwrap();
+
+        let ext_xml = fs::read_to_string(
+            port_etc.join("extension/com.oplus.oplus-feature-ext-bruce.xml"),
+        )
+        .unwrap();
+        assert!(ext_xml.contains("oplus.software.test"));
+
+        // Multicall xml-tool
+        run_from_args([
+            "xml-tool",
+            "remove-features",
+            "--port-dir",
+            port_etc.to_str().unwrap(),
+            "--force",
+            "oplus.software.test",
+        ])
+        .unwrap();
+        let ext_xml_after = fs::read_to_string(
+            port_etc.join("extension/com.oplus.oplus-feature-ext-bruce.xml"),
+        )
+        .unwrap();
+        assert!(!ext_xml_after.contains("oplus.software.test"));
+
+        // Subcommand & multicall rom-ops
+        let fc = dir.path().join("test_file_contexts");
+        fs::write(&fc, "/a u:object_r:a:s0\n/中文 u:object_r:b:s0\n").unwrap();
+        run_from_args([
+            "rom-ops",
+            "strip-non-ascii",
+            fc.to_str().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(fs::read_to_string(&fc).unwrap(), "/a u:object_r:a:s0\n");
+
+        run_from_args(["coloros-tools", "rom-ops", "tree-size", dir.path().to_str().unwrap()])
+            .unwrap();
     }
 }

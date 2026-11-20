@@ -29,12 +29,57 @@ PORT_PACK_JOBS=4 bash ./port.sh /path/to/base.zip /path/to/donor.zip
 заданное пользователем значение сохраняется. Алгоритм и уровень сжатия
 EROFS остаются `lz4hc,12`.
 
+## Параллельная распаковка разделов и патчинг APK/JAR
+
+- **Распаковка базовой и донорской ROM**: разделы `baserom` и `portrom`
+  извлекаются параллельно через `port_run_jobs` (`port_extract_job_count`, по
+  умолчанию до 4 задач, не больше числа CPU). Значение можно переопределить
+  переменной окружения `PORT_EXTRACT_JOBS` (от 1 до 32 или `auto`). Журналы
+  сохраняются в `build/logs/extract-base/<раздел>.log` и
+  `build/logs/extract-port/<раздел>.log`.
+- **Патчинг APK/JAR**: независимые приложения и системные архивы
+  (`services.jar`, `framework.jar`, `oplus-services.jar`, `HeyTapSpeechAssist`,
+  `AIUnit`, `SystemUI`, `OppoGallery2`, `Battery`, `Settings`, `OplusLauncher`,
+  `Aod`, `Wallpapers`) обрабатываются параллельно в изолированных временных
+  каталогах `tmp/apk_<цель>` с сохранением кэша в
+  `build/<app_patch_folder>/patched/`. Число задач настраивается параметром
+  `patch_jobs` в `bin/port_config` или переменной окружения `PORT_PATCH_JOBS`
+  (`auto` — до `min(cpus, 4)`, на машинах с доступной памятью менее 3 ГиБ
+  ограничивается 2 задачами; `1..32` — явное число задач). Журналы пишутся в
+  `build/logs/patch-apks/<цель>.log`.
+
+## Rust-ускорители (`coloros-tools`)
+
+При наличии бинарника `coloros-tools` (или его multicall-алиасов в `bin/<OS>/<arch>/`
+либо `tools-rust/target/release/`) скрипт автоматически использует нативные
+инструменты вместо последовательных вызовов JVM, `xmlstarlet`, `sed`, `perl` и
+Python. Если бинарники не собраны или отключены через `PORT_DISABLE_*=true`
+(`PORT_DISABLE_DEX_PATCHER`, `PORT_DISABLE_PROP_TOOL`, `PORT_DISABLE_XML_TOOL`,
+`PORT_DISABLE_ROM_OPS`), сохраняется прозрачный откат на прежние инструменты:
+
+- `xml-tool` (`crates/xml-tool`): пакетное добавление и удаление фич
+  (`add-features`, `remove-features` с дедупликацией и проверкой `baserom`),
+  удаление/обновление XML-элементов и текста (`delete-elements`,
+  `upsert-element`, `update-text`).
+- `rom-ops` (`crates/rom-ops`): нативный подсчёт размера дерева `tree-size`,
+  безопасный деблоат `debloat` с защитой от выхода симлинков, массовое
+  отключение проверки AVB `patch-vbmeta` и очистка не-ASCII строк
+  `strip-non-ascii` в `file_contexts`.
+- `prop-tool` (`crates/prop-tool`): пакетные операции `batch` (включая
+  `--comment-force`, `--regex-replace`) и многопоточный обход деревьев
+  `batch-dir` для `build.prop` через `rayon`.
+- `dex-patcher` (`crates/dex-patcher`): прямая правка DEX с выравниванием
+  (`zipalign`) без запуска JVM/apktool/APKEditor для `services.jar`,
+  `framework.jar`, `oplus-services.jar`, `OplusLauncher.apk`, `Aod.apk`,
+  `Wallpapers.apk`, `OppoGallery2.apk` и `HeyTapSpeechAssist.apk`.
+
 Дополнительные изменения:
 
 - Перед EROFS больше нет отдельного обхода всего дерева ради неиспользуемого
-  размера. Для EXT4 размер обычных файлов считается одним Python-процессом,
-  без запуска `stat` для каждого файла. Символические ссылки не обходятся;
-  размеры разреженных файлов считаются логически, как прежде.
+  размера. Для EXT4 размер обычных файлов считается через `rom-ops tree-size`
+  (или одним Python-процессом при его отсутствии), без запуска `stat` для
+  каждого файла. Символические ссылки не обходятся; размеры разреженных файлов
+  считаются логически, как прежде.
 - Копии сырых образов используют GNU `cp --reflink=auto --sparse=always`.
   На файловых системах с reflink копирование не требует записи всех блоков;
   в остальных случаях выполняется обычное копирование. На системах без
@@ -50,7 +95,7 @@ EROFS остаются `lz4hc,12`.
 Проверки, не требующие ROM или телефона:
 
 ```shell
-python3 -m unittest discover -s tests -p test_port_performance.py -v
+python3 -m unittest discover -s tests -v
 ```
 
 Для сравнения полного времени используйте одну пару ROM и одинаковый режим

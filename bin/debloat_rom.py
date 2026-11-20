@@ -8,12 +8,13 @@ import shutil
 def debloat(root: Path, manifest: Path) -> list[str]:
     root = root.resolve(strict=True)
     targets = set()
-    for raw in manifest.read_text().splitlines():
+    for raw in manifest.read_text(encoding='utf-8').splitlines():
         pattern = raw.strip()
         if not pattern or pattern.startswith('#'):
             continue
-        parts = Path(pattern).parts
-        if len(parts) < 2 or parts[0] not in ('my_product', 'my_stock', 'my_preload') or '..' in parts or Path(pattern).is_absolute():
+        pattern_path = Path(pattern)
+        parts = pattern_path.parts
+        if len(parts) < 2 or parts[0] not in ('my_product', 'my_stock', 'my_preload') or '..' in parts or pattern_path.is_absolute() or pattern_path.drive:
             raise ValueError(f'Unsafe debloat path: {pattern}')
         for path in root.glob(pattern):
             # Resolve the parent only: an escaping leaf symlink may be

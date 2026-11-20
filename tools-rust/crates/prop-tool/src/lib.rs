@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use coloros_common::{read_text_lossy, write_text_lf, ToolError};
+use rayon::prelude::*;
 use regex::Regex;
 use walkdir::WalkDir;
 
@@ -71,9 +72,15 @@ pub enum Commands {
         /// Comment out lines matching `^key([=_.].*)?$` with `#` (`remove_prop_v2`)
         #[arg(long)]
         comment: Vec<String>,
+        /// Always comment out lines matching `^key([=_.].*)?$` regardless of `--base`
+        #[arg(long)]
+        comment_force: Vec<String>,
         /// Replace literal substring `old=new` across the file
         #[arg(long)]
         replace: Vec<String>,
+        /// Replace regex `pattern=replacement` across each line
+        #[arg(long)]
+        regex_replace: Vec<String>,
         /// Path to a batch operations file (or `-` for stdin)
         #[arg(long)]
         batch_file: Option<String>,
@@ -89,6 +96,48 @@ pub enum Commands {
         /// Optional bruce build.prop path for dual-file `add_prop_v2` / `remove_prop_v2` mode
         #[arg(long)]
         bruce_file: Option<String>,
+    },
+    /// Apply batch property/text modifications across all matching files under a directory in parallel
+    BatchDir {
+        /// Root directory to walk recursively
+        #[arg(long)]
+        dir: String,
+        /// Filename glob to match (default: `build.prop`)
+        #[arg(long, default_value = "build.prop")]
+        name: String,
+        /// Set or update `key=val` in place (or append if missing)
+        #[arg(long)]
+        set: Vec<String>,
+        /// Update `key=val` only if `key` already exists in the file
+        #[arg(long)]
+        set_existing: Vec<String>,
+        /// Delete lines matching key, `key=val`, or regex pattern
+        #[arg(long)]
+        remove: Vec<String>,
+        /// Comment out lines matching `^key([=_.].*)?$` with `#`
+        #[arg(long)]
+        comment: Vec<String>,
+        /// Always comment out lines matching `^key([=_.].*)?$` regardless of `--base`
+        #[arg(long)]
+        comment_force: Vec<String>,
+        /// Replace literal substring `old=new` across each file
+        #[arg(long)]
+        replace: Vec<String>,
+        /// Replace regex `pattern=replacement` across each line
+        #[arg(long)]
+        regex_replace: Vec<String>,
+        /// Path to a batch operations file (or `-` for stdin)
+        #[arg(long)]
+        batch_file: Option<String>,
+        /// Read batch operations from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Optional base build.prop path; when set without `--force`, `--comment` skips keys present in base
+        #[arg(long)]
+        base: Option<String>,
+        /// Force commenting even when `--base` contains the property
+        #[arg(long)]
+        force: bool,
     },
     /// Clean fstab files (disable AVB, remove erofs, remove data encryption)
     CleanFstab {
@@ -345,6 +394,31 @@ impl PropFile {
         count
     }
 
+    /// Replace all regex matches of `pattern` with `replacement` across lines.
+    /// Re-parses modified lines to keep `PropLine` variants consistent.
+    pub fn regex_replace_all(
+        &mut self,
+        pattern: &str,
+        replacement: &str,
+    ) -> coloros_common::Result<usize> {
+        if pattern.is_empty() {
+            return Ok(0);
+        }
+        let re = Regex::new(pattern).map_err(|e| {
+            ToolError::InvalidArgument(format!("Invalid regex-replace pattern '{pattern}': {e}"))
+        })?;
+        let mut count = 0;
+        for line in &mut self.lines {
+            let raw = line.to_line_string();
+            let replaced = re.replace_all(&raw, replacement);
+            if replaced.as_ref() != raw {
+                *line = PropLine::parse(&replaced);
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Ensure `import /mnt/vendor/my_product/etc/bruce/build.prop` is present at the end.
     pub fn ensure_bruce_import(&mut self) {
         let already_present = self.lines.iter().any(|line| {
@@ -495,6 +569,11 @@ pub enum BatchOp {
     Comment { key: String, force: bool },
     /// Replace literal substring `from` with `to`.
     Replace { from: String, to: String },
+    /// Replace regex `pattern` with `replacement` across each line.
+    RegexReplace {
+        pattern: String,
+        replacement: String,
+    },
 }
 
 /// Parse batch operations from a multi-line script/stdin string.
@@ -589,10 +668,19 @@ pub fn parse_batch_script(script: &str, default_force: bool) -> coloros_common::
                 force,
             });
         } else if let Some(rest) = line
+            .strip_prefix("regex-replace ")
+            .or_else(|| line.strip_prefix("REGEX-REPLACE "))
+        {
+            let (pattern, replacement) = parse_replace_pair(rest.trim(), line_num)?;
+            ops.push(BatchOp::RegexReplace {
+                pattern,
+                replacement,
+            });
+        } else if let Some(rest) = line
             .strip_prefix("replace ")
             .or_else(|| line.strip_prefix("REPLACE "))
         {
-            let (from, to) = parse_key_val(rest.trim(), line_num)?;
+            let (from, to) = parse_replace_pair(rest.trim(), line_num)?;
             ops.push(BatchOp::Replace { from, to });
         } else if line.contains('=') {
             let (k, v) = parse_key_val(line, line_num)?;
@@ -623,6 +711,22 @@ fn parse_key_val(arg: &str, line_num: usize) -> coloros_common::Result<(String, 
         });
     }
     Ok((key.to_string(), v.to_string()))
+}
+
+/// Parse `old=new` or `pattern=replacement`, allowing a leading `=` in `old`/`pattern`
+/// (e.g. `=OnePlus[[:space:]]*$=OPPO`) by searching for `=` starting at byte 1.
+fn parse_replace_pair(arg: &str, line_num: usize) -> coloros_common::Result<(String, String)> {
+    if arg.len() >= 2 {
+        if let Some(rel_eq) = arg[1..].find('=') {
+            let eq_idx = 1 + rel_eq;
+            return Ok((arg[..eq_idx].to_string(), arg[eq_idx + 1..].to_string()));
+        }
+    }
+    Err(ToolError::Parse {
+        file: PathBuf::from("<batch>"),
+        line: line_num,
+        message: format!("Expected 'pattern=replacement', got '{arg}'"),
+    })
 }
 
 /// Apply a sequence of `BatchOp`s to a single `PropFile` (optionally consulting `base` for non-forced `Comment`).
@@ -656,6 +760,12 @@ pub fn apply_batch(
             }
             BatchOp::Replace { from, to } => {
                 prop.replace_all(from, to);
+            }
+            BatchOp::RegexReplace {
+                pattern,
+                replacement,
+            } => {
+                prop.regex_replace_all(pattern, replacement)?;
             }
         }
     }
@@ -715,6 +825,13 @@ pub fn apply_batch_v2(
             BatchOp::Replace { from, to } => {
                 portrom_prop.replace_all(from, to);
                 bruce_prop.replace_all(from, to);
+            }
+            BatchOp::RegexReplace {
+                pattern,
+                replacement,
+            } => {
+                portrom_prop.regex_replace_all(pattern, replacement)?;
+                bruce_prop.regex_replace_all(pattern, replacement)?;
             }
         }
     }
@@ -875,53 +992,27 @@ pub fn run_cli(cli: Cli) -> Result<()> {
             set_existing,
             remove,
             comment,
+            comment_force,
             replace,
+            regex_replace,
             batch_file,
             stdin,
             base,
             force,
             bruce_file,
         }) => {
-            let mut ops: Vec<BatchOp> = Vec::new();
-
-            for pattern in remove {
-                ops.push(BatchOp::Remove { pattern });
-            }
-            for key in comment {
-                ops.push(BatchOp::Comment { key, force });
-            }
-            for item in set_existing {
-                let (key, value) = parse_key_val(&item, 0)?;
-                ops.push(BatchOp::SetExisting { key, value });
-            }
-            for item in set {
-                let (key, value) = parse_key_val(&item, 0)?;
-                ops.push(BatchOp::Set { key, value });
-            }
-            for item in replace {
-                let (from, to) = parse_key_val(&item, 0)?;
-                ops.push(BatchOp::Replace { from, to });
-            }
-
-            if let Some(bf) = batch_file {
-                let script = if bf == "-" {
-                    let mut buf = String::new();
-                    io::stdin()
-                        .read_to_string(&mut buf)
-                        .context("Failed to read batch script from stdin")?;
-                    buf
-                } else {
-                    read_text_lossy(&bf)
-                        .with_context(|| format!("Failed to read batch file: {bf}"))?
-                };
-                ops.extend(parse_batch_script(&script, force)?);
-            } else if stdin {
-                let mut buf = String::new();
-                io::stdin()
-                    .read_to_string(&mut buf)
-                    .context("Failed to read batch script from stdin")?;
-                ops.extend(parse_batch_script(&script_or_empty(&buf), force)?);
-            }
+            let ops = build_batch_ops(
+                set,
+                set_existing,
+                remove,
+                comment,
+                comment_force,
+                replace,
+                regex_replace,
+                batch_file,
+                stdin,
+                force,
+            )?;
 
             let base_prop = match base {
                 Some(ref b) => Some(
@@ -956,6 +1047,84 @@ pub fn run_cli(cli: Cli) -> Result<()> {
 
             Ok(())
         }
+        Some(Commands::BatchDir {
+            dir,
+            name,
+            set,
+            set_existing,
+            remove,
+            comment,
+            comment_force,
+            replace,
+            regex_replace,
+            batch_file,
+            stdin,
+            base,
+            force,
+        }) => {
+            let ops = build_batch_ops(
+                set,
+                set_existing,
+                remove,
+                comment,
+                comment_force,
+                replace,
+                regex_replace,
+                batch_file,
+                stdin,
+                force,
+            )?;
+
+            let base_prop = match base {
+                Some(ref b) => Some(
+                    PropFile::load(b).with_context(|| format!("Failed to read base prop: {b}"))?,
+                ),
+                None => None,
+            };
+
+            let name_re = glob_to_regex(&name)?;
+            let mut files: Vec<PathBuf> = WalkDir::new(&dir)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|fname| name_re.is_match(fname))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.into_path())
+                .collect();
+            files.sort();
+
+            let modified_count: usize = files
+                .par_iter()
+                .map(|path| -> Result<usize> {
+                    let mut prop = PropFile::load(path)
+                        .with_context(|| format!("Failed to read prop file: {}", path.display()))?;
+                    let before = prop.to_string();
+                    apply_batch(&mut prop, &ops, base_prop.as_ref())?;
+                    let after = prop.to_string();
+                    if after != before {
+                        write_text_lf(path, &after).with_context(|| {
+                            format!("Failed to write prop file: {}", path.display())
+                        })?;
+                        Ok(1)
+                    } else {
+                        Ok(0)
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .sum();
+
+            println!(
+                "[+] prop-tool batch-dir: processed {} file(s), modified {} file(s)",
+                files.len(),
+                modified_count
+            );
+            Ok(())
+        }
         Some(Commands::CleanFstab {
             fstab,
             output,
@@ -978,8 +1147,87 @@ pub fn run_cli(cli: Cli) -> Result<()> {
     }
 }
 
-fn script_or_empty(s: &str) -> &str {
-    s
+#[allow(clippy::too_many_arguments)]
+fn build_batch_ops(
+    set: Vec<String>,
+    set_existing: Vec<String>,
+    remove: Vec<String>,
+    comment: Vec<String>,
+    comment_force: Vec<String>,
+    replace: Vec<String>,
+    regex_replace: Vec<String>,
+    batch_file: Option<String>,
+    stdin: bool,
+    force: bool,
+) -> Result<Vec<BatchOp>> {
+    let mut ops: Vec<BatchOp> = Vec::new();
+
+    for pattern in remove {
+        ops.push(BatchOp::Remove { pattern });
+    }
+    for key in comment {
+        ops.push(BatchOp::Comment { key, force });
+    }
+    for key in comment_force {
+        ops.push(BatchOp::Comment { key, force: true });
+    }
+    for item in set_existing {
+        let (key, value) = parse_key_val(&item, 0)?;
+        ops.push(BatchOp::SetExisting { key, value });
+    }
+    for item in set {
+        let (key, value) = parse_key_val(&item, 0)?;
+        ops.push(BatchOp::Set { key, value });
+    }
+    for item in replace {
+        let (from, to) = parse_replace_pair(&item, 0)?;
+        ops.push(BatchOp::Replace { from, to });
+    }
+    for item in regex_replace {
+        let (pattern, replacement) = parse_replace_pair(&item, 0)?;
+        ops.push(BatchOp::RegexReplace {
+            pattern,
+            replacement,
+        });
+    }
+
+    if let Some(bf) = batch_file {
+        let script = if bf == "-" {
+            let mut buf = String::new();
+            io::stdin()
+                .read_to_string(&mut buf)
+                .context("Failed to read batch script from stdin")?;
+            buf
+        } else {
+            read_text_lossy(&bf).with_context(|| format!("Failed to read batch file: {bf}"))?
+        };
+        ops.extend(parse_batch_script(&script, force)?);
+    } else if stdin {
+        let mut buf = String::new();
+        io::stdin()
+            .read_to_string(&mut buf)
+            .context("Failed to read batch script from stdin")?;
+        ops.extend(parse_batch_script(&buf, force)?);
+    }
+
+    Ok(ops)
+}
+
+fn glob_to_regex(glob: &str) -> Result<Regex> {
+    let mut re = String::from("^");
+    for ch in glob.chars() {
+        match ch {
+            '*' => re.push_str(".*"),
+            '?' => re.push('.'),
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '[' | ']' | '{' | '}' | '\\' => {
+                re.push('\\');
+                re.push(ch);
+            }
+            _ => re.push(ch),
+        }
+    }
+    re.push('$');
+    Regex::new(&re).with_context(|| format!("Invalid filename glob: {glob}"))
 }
 
 #[cfg(test)]
@@ -1365,7 +1613,9 @@ odm /odm ext4 ro,barrier=1,discard wait,avb=vbmeta_a,logical,first_stage_mount
                 set_existing: vec![],
                 remove: vec!["ro.port.extra".to_string()],
                 comment: vec!["ro.panel.pad".to_string()],
+                comment_force: vec![],
                 replace: vec![],
+                regex_replace: vec![],
                 batch_file: None,
                 stdin: false,
                 base: None,
@@ -1433,7 +1683,9 @@ odm /odm ext4 ro,barrier=1,discard wait,avb=vbmeta_a,logical,first_stage_mount
                 set_existing: vec![],
                 remove: vec![],
                 comment: vec![],
+                comment_force: vec![],
                 replace: vec![],
+                regex_replace: vec![],
                 batch_file: Some(batch_path.to_string_lossy().into_owned()),
                 stdin: false,
                 base: None,
@@ -1472,5 +1724,98 @@ odm /odm ext4 ro,barrier=1,discard wait,avb=vbmeta_a,logical,first_stage_mount
             "vendor /vendor ext4 ro wait,logical\n"
         );
         assert_eq!(read_text_lossy(&fstab_emmc).unwrap(), "");
+    }
+
+    #[test]
+    fn test_batch_dir_and_regex_replace_and_comment_force() {
+        let dir = TempDir::new().unwrap();
+        let sys_prop = dir.path().join("system/system/build.prop");
+        let ven_prop = dir.path().join("vendor/build.prop");
+        let other_txt = dir.path().join("vendor/other.txt");
+        std::fs::create_dir_all(sys_prop.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(ven_prop.parent().unwrap()).unwrap();
+
+        write_text_lf(
+            &sys_prop,
+            "persist.sys.timezone=UTC\nro.product.model=PJD110\nro.build.user=oppo\nro.product.brand=OnePlus   \n",
+        )
+        .unwrap();
+        write_text_lf(
+            &ven_prop,
+            "ro.vendor.product.model=PJD110\nro.build.display.id=OLD\nro.product.manufacturer=OnePlus\n",
+        )
+        .unwrap();
+        write_text_lf(&other_txt, "PJD110=untouched\n").unwrap();
+
+        run_cli(Cli {
+            command: Some(Commands::BatchDir {
+                dir: dir.path().to_string_lossy().into_owned(),
+                name: "build.prop".to_string(),
+                set: vec![],
+                set_existing: vec![
+                    "persist.sys.timezone=Asia/Shanghai".to_string(),
+                    "ro.build.user=Bruce".to_string(),
+                    "ro.build.display.id=NEW_DISPLAY".to_string(),
+                ],
+                remove: vec![],
+                comment: vec![],
+                comment_force: vec![],
+                replace: vec!["PJD110=KB2000".to_string()],
+                regex_replace: vec!["=OnePlus[[:space:]]*$==OPPO".to_string()],
+                batch_file: None,
+                stdin: false,
+                base: None,
+                force: false,
+            }),
+        })
+        .unwrap();
+
+        let sys_after = PropFile::load(&sys_prop).unwrap();
+        assert_eq!(sys_after.get("persist.sys.timezone"), Some("Asia/Shanghai"));
+        assert_eq!(sys_after.get("ro.product.model"), Some("KB2000"));
+        assert_eq!(sys_after.get("ro.build.user"), Some("Bruce"));
+        assert_eq!(sys_after.get("ro.product.brand"), Some("OPPO"));
+        assert_eq!(sys_after.get("ro.build.display.id"), None); // set_existing did not add it!
+
+        let ven_after = PropFile::load(&ven_prop).unwrap();
+        assert_eq!(ven_after.get("ro.vendor.product.model"), Some("KB2000"));
+        assert_eq!(ven_after.get("ro.build.display.id"), Some("NEW_DISPLAY"));
+        assert_eq!(ven_after.get("ro.product.manufacturer"), Some("OPPO"));
+
+        assert_eq!(read_text_lossy(&other_txt).unwrap(), "PJD110=untouched\n");
+
+        // Test --comment + --comment-force together in one Batch call
+        let base_prop = dir.path().join("base.prop");
+        let port_prop = dir.path().join("port.prop");
+        let bruce_prop = dir.path().join("bruce.prop");
+        write_text_lf(&base_prop, "ro.keep.base=1\nro.force.del=1\n").unwrap();
+        write_text_lf(&port_prop, "ro.force.del=2\n").unwrap();
+        write_text_lf(&bruce_prop, "ro.keep.base=2\nro.drop.nonbase=1\n").unwrap();
+
+        run_cli(Cli {
+            command: Some(Commands::Batch {
+                file: port_prop.to_string_lossy().into_owned(),
+                output: None,
+                set: vec![],
+                set_existing: vec![],
+                remove: vec![],
+                comment: vec!["ro.keep.base".to_string(), "ro.drop.nonbase".to_string()],
+                comment_force: vec!["ro.force.del".to_string()],
+                replace: vec![],
+                regex_replace: vec![],
+                batch_file: None,
+                stdin: false,
+                base: Some(base_prop.to_string_lossy().into_owned()),
+                force: false,
+                bruce_file: Some(bruce_prop.to_string_lossy().into_owned()),
+            }),
+        })
+        .unwrap();
+
+        let port_after = PropFile::load(&port_prop).unwrap();
+        let bruce_after = PropFile::load(&bruce_prop).unwrap();
+        assert_eq!(bruce_after.get("ro.keep.base"), Some("2"));
+        assert_eq!(bruce_after.get("ro.drop.nonbase"), None);
+        assert_eq!(port_after.get("ro.force.del"), None);
     }
 }

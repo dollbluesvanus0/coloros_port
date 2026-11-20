@@ -84,7 +84,7 @@ def stage_overlay(images, aapt2, apksigner):
     for contexts in (images / 'config/system_ext_file_contexts',
                      images / 'system_ext/etc/selinux/system_ext_file_contexts'):
         if contexts.is_file() and rule not in contexts.read_text(encoding='utf-8').splitlines():
-            with contexts.open('a', encoding='utf-8') as output:
+            with contexts.open('a', encoding='utf-8', newline='\n') as output:
                 output.write(f'\n{rule}\n')
     return True
 

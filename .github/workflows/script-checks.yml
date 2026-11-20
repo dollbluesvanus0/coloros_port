@@ -5,24 +5,18 @@ on:
     paths:
       - 'port.sh'
       - 'functions.sh'
-      - 'bin/port_performance.sh'
-      - 'bin/tree_size.py'
-      - 'tests/test_port_performance.py'
-      - 'bin/systemui_color_compat.sh'
-      - 'bin/systemui_color_overlay.py'
-      - 'tests/test_systemui_color_overlay.py'
-      - '.github/workflows/script-checks.yml'
+      - 'setup.sh'
+      - 'bin/**'
+      - 'tests/**'
+      - '.github/workflows/**'
   pull_request:
     paths:
       - 'port.sh'
       - 'functions.sh'
-      - 'bin/port_performance.sh'
-      - 'bin/tree_size.py'
-      - 'tests/test_port_performance.py'
-      - 'bin/systemui_color_compat.sh'
-      - 'bin/systemui_color_overlay.py'
-      - 'tests/test_systemui_color_overlay.py'
-      - '.github/workflows/script-checks.yml'
+      - 'setup.sh'
+      - 'bin/**'
+      - 'tests/**'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
@@ -33,12 +27,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Install Python test dependencies
+        run: |
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            python3-requests python3-tqdm
       - name: Check shell syntax
         run: |
-          for script in port.sh functions.sh bin/port_performance.sh bin/systemui_color_compat.sh; do
+          for script in port.sh functions.sh setup.sh bin/port_performance.sh bin/systemui_color_compat.sh bin/getSuperSize.sh; do
             bash -n "$script"
           done
-      - name: Check packing and I/O helpers without ROM images
+      - name: Run full Python unit test suite
         run: |
-          python3 -m unittest discover -s tests -p test_port_performance.py -v
-          python3 -m unittest discover -s tests -p test_systemui_color_overlay.py -v
+          python3 -m unittest discover -s tests -v

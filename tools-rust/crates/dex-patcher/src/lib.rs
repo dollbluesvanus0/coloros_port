@@ -162,6 +162,7 @@ pub enum Commands {
     },
 
     /// Hook `move-result vX` after `const-string` matching a keyword/regex, replacing it with `const/16 vX, <value>`
+    #[command(visible_alias = "hook-move-result")]
     HookAfterString {
         /// Path to APK, JAR, or DEX file
         #[arg(short, long)]
@@ -256,6 +257,10 @@ pub enum Commands {
         #[arg(long = "replace-sget")]
         replace_sgets: Vec<String>,
 
+        /// Required replace-sget (fail if 0 matched across all DEXs): `[Class->]FIELD=VALUE`
+        #[arg(long = "require-sget")]
+        require_sgets: Vec<String>,
+
         /// Replace string literal (`OLD=NEW`), repeatable
         #[arg(long = "replace-string")]
         replace_strings: Vec<String>,
@@ -263,6 +268,10 @@ pub enum Commands {
         /// Hook move-result after const-string (`STRING=INT_VAL`), repeatable
         #[arg(long = "hook-after-string")]
         hooks: Vec<String>,
+
+        /// Required hook-after-string (fail if 0 matched across all DEXs): `STRING=INT_VAL`
+        #[arg(long = "require-hook")]
+        require_hooks: Vec<String>,
 
         /// Also apply `patch-apk-protection`
         #[arg(long)]
@@ -575,8 +584,10 @@ pub fn run_cli(cli: Cli) -> Result<()> {
             stubs,
             require_stubs,
             replace_sgets,
+            require_sgets,
             replace_strings,
             hooks,
+            require_hooks,
             apk_protection,
             services,
             inspiration_aod_gate,
@@ -594,6 +605,10 @@ pub fn run_cli(cli: Cli) -> Result<()> {
                 .iter()
                 .map(|s| parse_sget_spec(s))
                 .collect::<Result<Vec<_>>>()?;
+            let parsed_req_sgets: Vec<_> = require_sgets
+                .iter()
+                .map(|s| parse_sget_spec(s))
+                .collect::<Result<Vec<_>>>()?;
             let parsed_strings: Vec<(&str, &str)> = replace_strings
                 .iter()
                 .map(|s| {
@@ -601,19 +616,24 @@ pub fn run_cli(cli: Cli) -> Result<()> {
                         .with_context(|| format!("Invalid --replace-string '{}' (expected OLD=NEW)", s))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let parsed_hooks: Vec<(String, i32)> = hooks
+            let parse_hook = |s: &str| -> Result<(String, i32)> {
+                let (pat, val_str) = s
+                    .split_once('=')
+                    .with_context(|| format!("Invalid hook spec '{}' (expected STRING=INT)", s))?;
+                let v = patch::parse_int_literal(val_str)
+                    .with_context(|| format!("Invalid integer '{}' in '{}'", val_str, s))?;
+                Ok((pat.to_string(), v))
+            };
+            let parsed_hooks: Vec<(String, i32)> =
+                hooks.iter().map(|s| parse_hook(s)).collect::<Result<Vec<_>>>()?;
+            let parsed_req_hooks: Vec<(String, i32)> = require_hooks
                 .iter()
-                .map(|s| {
-                    let (pat, val_str) = s
-                        .split_once('=')
-                        .with_context(|| format!("Invalid --hook-after-string '{}' (expected STRING=INT)", s))?;
-                    let v = patch::parse_int_literal(val_str)
-                        .with_context(|| format!("Invalid integer '{}' in '{}'", val_str, s))?;
-                    Ok((pat.to_string(), v))
-                })
+                .map(|s| parse_hook(s))
                 .collect::<Result<Vec<_>>>()?;
 
-            let mut req_counts = vec![0usize; parsed_req_stubs.len()];
+            let mut req_stub_counts = vec![0usize; parsed_req_stubs.len()];
+            let mut req_sget_counts = vec![0usize; parsed_req_sgets.len()];
+            let mut req_hook_counts = vec![0usize; parsed_req_hooks.len()];
             let mut aod_gate_count = 0usize;
 
             let total = patch_file_or_container(&file, output.as_deref(), |_entry, dex| {
@@ -623,17 +643,27 @@ pub fn run_cli(cli: Cli) -> Result<()> {
                 }
                 for (i, (cls, meth, spec)) in parsed_req_stubs.iter().enumerate() {
                     let c = stub_method(dex, cls.as_deref(), meth, None, *spec)?;
-                    req_counts[i] += c;
+                    req_stub_counts[i] += c;
                     local += c;
                 }
                 for (cls, field, val) in &parsed_sgets {
                     local += replace_sget_with_const_string(dex, cls, field, val, None)?;
+                }
+                for (i, (cls, field, val)) in parsed_req_sgets.iter().enumerate() {
+                    let c = replace_sget_with_const_string(dex, cls, field, val, None)?;
+                    req_sget_counts[i] += c;
+                    local += c;
                 }
                 for &(old_s, new_s) in &parsed_strings {
                     local += replace_string(dex, old_s, new_s, None, None)?;
                 }
                 for (pat, val) in &parsed_hooks {
                     local += hook_move_result_after_string(dex, pat, *val, None, None)?;
+                }
+                for (i, (pat, val)) in parsed_req_hooks.iter().enumerate() {
+                    let c = hook_move_result_after_string(dex, pat, *val, None, None)?;
+                    req_hook_counts[i] += c;
+                    local += c;
                 }
                 if apk_protection {
                     local += patch_apk_protection_dex(dex)?;
@@ -649,11 +679,29 @@ pub fn run_cli(cli: Cli) -> Result<()> {
                 Ok(local)
             })?;
 
-            for (i, cnt) in req_counts.iter().enumerate() {
+            for (i, cnt) in req_stub_counts.iter().enumerate() {
                 if *cnt == 0 {
                     bail!(
                         "batch --require-stub '{}' matched 0 methods in {}",
                         require_stubs[i],
+                        file.display()
+                    );
+                }
+            }
+            for (i, cnt) in req_sget_counts.iter().enumerate() {
+                if *cnt == 0 {
+                    bail!(
+                        "batch --require-sget '{}' matched 0 instructions in {}",
+                        require_sgets[i],
+                        file.display()
+                    );
+                }
+            }
+            for (i, cnt) in req_hook_counts.iter().enumerate() {
+                if *cnt == 0 {
+                    bail!(
+                        "batch --require-hook '{}' matched 0 instructions in {}",
+                        require_hooks[i],
                         file.display()
                     );
                 }
@@ -2229,5 +2277,313 @@ mod tests {
         let mut dex_entry = Vec::new();
         std::io::Read::read_to_end(&mut za.by_name("classes.dex").unwrap(), &mut dex_entry).unwrap();
         assert_strict_mapped_dex_valid(&dex_entry);
+    }
+
+    #[test]
+    fn test_all_five_direct_apk_patch_workflows_and_zipalign() {
+        let tmp = TempDir::new().unwrap();
+
+        let make_apk = |name: &str, dex_entries: Vec<(&str, Vec<u8>)>| -> PathBuf {
+            let p = tmp.path().join(name);
+            let mut zip_buf = Vec::new();
+            {
+                let mut zw = ZipWriter::new(std::io::Cursor::new(&mut zip_buf));
+                let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+                let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+                zw.start_file("AndroidManifest.xml", deflated).unwrap();
+                zw.write_all(b"<manifest/>").unwrap();
+                zw.start_file("resources.arsc", stored).unwrap();
+                zw.write_all(&[1, 2, 3, 4, 5]).unwrap();
+                zw.start_file("assets/untouched.dex", stored).unwrap();
+                zw.write_all(b"dex\n035\0untouched_asset").unwrap();
+                for (entry_name, bytes) in dex_entries {
+                    zw.start_file(entry_name, stored).unwrap();
+                    zw.write_all(&bytes).unwrap();
+                }
+                zw.finish().unwrap();
+            }
+            fs::write(&p, zip_buf).unwrap();
+            p
+        };
+
+        // 1. OplusLauncher.apk: SystemPropertiesHelper::getFirstApiLevel -> 0x22
+        let mut b_launch = DexBuilder::new();
+        b_launch.add_class("Lcom/oplus/basecommon/util/SystemPropertiesHelper;", "Ljava/lang/Object;");
+        b_launch.add_method(MethodSpec {
+            class_desc: "Lcom/oplus/basecommon/util/SystemPropertiesHelper;".to_string(),
+            name: "getFirstApiLevel".to_string(),
+            params: vec![],
+            return_type: "I".to_string(),
+            access_flags: 0x0001 | ACC_STATIC,
+            is_direct: true,
+            registers_size: 1,
+            ins_size: 0,
+            outs_size: 0,
+            insns: vec![0x0012, 0x000f],
+            tries_size: 0,
+            tries_and_handlers: Vec::new(),
+        });
+        let launcher_apk = make_apk("OplusLauncher.apk", vec![("classes.dex", attach_map_list(b_launch.build()))]);
+        run_cli(Cli::parse_from([
+            "dex-patcher",
+            "stub-method",
+            "--file",
+            launcher_apk.to_str().unwrap(),
+            "--class",
+            "com/oplus/basecommon/util/SystemPropertiesHelper",
+            "--method",
+            "getFirstApiLevel",
+            "--return-int",
+            "0x22",
+            "--require",
+        ]))
+        .unwrap();
+        let launcher_zip = fs::read(&launcher_apk).unwrap();
+        verify_zip_alignment_4(&launcher_zip).unwrap();
+
+        // 2. Aod.apk: CommonUtils::isSupportFullAod -> true, SettingsUtils::getKeyAodAllDaySupportSettings -> true + optional inspiration AOD gate
+        let mut b_aod = DexBuilder::new();
+        b_aod.add_class("Lcom/oplus/aod/util/CommonUtils;", "Ljava/lang/Object;");
+        b_aod.add_class("Lcom/oplus/aod/util/SettingsUtils;", "Ljava/lang/Object;");
+        b_aod.add_string("oplus_keyguard_workshop_aod_support");
+        b_aod.add_method_ref(
+            "Landroid/provider/Settings$Secure;",
+            "getInt",
+            &["Landroid/content/ContentResolver;", "Ljava/lang/String;", "I"],
+            "I",
+        );
+        b_aod.add_method_ref("Lcom/oplus/aod/util/CommonUtils;", "isSupportFullAod", &[], "Z");
+        b_aod.add_method_ref("Lcom/oplus/aod/util/CommonUtils;", "isWorkshopSupported", &[], "I");
+        b_aod.add_method_ref("Lcom/oplus/aod/util/SettingsUtils;", "getKeyAodAllDaySupportSettings", &[], "Z");
+        let tmp_aod = DexFile::parse(b_aod.build()).unwrap();
+        let gate_str_idx = tmp_aod
+            .strings
+            .iter()
+            .position(|s| s == "oplus_keyguard_workshop_aod_support")
+            .unwrap() as u16;
+        let get_int_idx = (0..tmp_aod.methods.len())
+            .find(|&i| tmp_aod.get_method_signature(i as u32).map(|(_, n, _)| n == "getInt").unwrap_or(false))
+            .unwrap() as u16;
+        b_aod.add_method(MethodSpec {
+            class_desc: "Lcom/oplus/aod/util/CommonUtils;".to_string(),
+            name: "isSupportFullAod".to_string(),
+            params: vec![],
+            return_type: "Z".to_string(),
+            access_flags: 0x0001 | ACC_STATIC,
+            is_direct: true,
+            registers_size: 1,
+            ins_size: 0,
+            outs_size: 0,
+            insns: vec![0x0012, 0x000f],
+            tries_size: 0,
+            tries_and_handlers: Vec::new(),
+        });
+        b_aod.add_method(MethodSpec {
+            class_desc: "Lcom/oplus/aod/util/CommonUtils;".to_string(),
+            name: "isWorkshopSupported".to_string(),
+            params: vec![],
+            return_type: "I".to_string(),
+            access_flags: 0x0001 | ACC_STATIC,
+            is_direct: true,
+            registers_size: 3,
+            ins_size: 0,
+            outs_size: 3,
+            insns: vec![0x011a, gate_str_idx, 0x3071, get_int_idx, 0x0210, 0x000a, 0x000f],
+            tries_size: 0,
+            tries_and_handlers: Vec::new(),
+        });
+        b_aod.add_method(MethodSpec {
+            class_desc: "Lcom/oplus/aod/util/SettingsUtils;".to_string(),
+            name: "getKeyAodAllDaySupportSettings".to_string(),
+            params: vec![],
+            return_type: "Z".to_string(),
+            access_flags: 0x0001 | ACC_STATIC,
+            is_direct: true,
+            registers_size: 1,
+            ins_size: 0,
+            outs_size: 0,
+            insns: vec![0x0012, 0x000f],
+            tries_size: 0,
+            tries_and_handlers: Vec::new(),
+        });
+        let aod_apk = make_apk("Aod.apk", vec![("classes.dex", attach_map_list(b_aod.build()))]);
+        run_cli(Cli::parse_from([
+            "dex-patcher",
+            "batch",
+            "--file",
+            aod_apk.to_str().unwrap(),
+            "--require-stub",
+            "com/oplus/aod/util/CommonUtils::isSupportFullAod=true",
+            "--require-stub",
+            "com/oplus/aod/util/SettingsUtils::getKeyAodAllDaySupportSettings=true",
+            "--inspiration-aod-gate",
+        ]))
+        .unwrap();
+        let aod_zip = fs::read(&aod_apk).unwrap();
+        verify_zip_alignment_4(&aod_zip).unwrap();
+
+        // 3. Wallpapers.apk: patch-inspiration-aod-gate in classes2.dex + untouched assets/untouched.dex
+        let mut b_wall = DexBuilder::new();
+        b_wall.add_class("Lcom/oplus/wallpapers/rely/utils/m$z;", "Ljava/lang/Object;");
+        b_wall.add_string("oplus_keyguard_workshop_aod_support");
+        b_wall.add_method_ref(
+            "Landroid/provider/Settings$Secure;",
+            "getInt",
+            &["Landroid/content/ContentResolver;", "Ljava/lang/String;", "I"],
+            "I",
+        );
+        b_wall.add_method_ref("Lcom/oplus/wallpapers/rely/utils/m$z;", "a", &[], "I");
+        let tmp_wall = DexFile::parse(b_wall.build()).unwrap();
+        let w_str_idx = tmp_wall
+            .strings
+            .iter()
+            .position(|s| s == "oplus_keyguard_workshop_aod_support")
+            .unwrap() as u16;
+        let w_get_int_idx = (0..tmp_wall.methods.len())
+            .find(|&i| tmp_wall.get_method_signature(i as u32).map(|(_, n, _)| n == "getInt").unwrap_or(false))
+            .unwrap() as u16;
+        b_wall.add_method(MethodSpec {
+            class_desc: "Lcom/oplus/wallpapers/rely/utils/m$z;".to_string(),
+            name: "a".to_string(),
+            params: vec![],
+            return_type: "I".to_string(),
+            access_flags: 0x0001 | ACC_STATIC,
+            is_direct: true,
+            registers_size: 3,
+            ins_size: 0,
+            outs_size: 3,
+            insns: vec![0x011a, w_str_idx, 0x3071, w_get_int_idx, 0x0210, 0x000a, 0x000f],
+            tries_size: 0,
+            tries_and_handlers: Vec::new(),
+        });
+        let wall_apk = make_apk(
+            "Wallpapers.apk",
+            vec![
+                ("classes.dex", attach_map_list(b_launch.build())),
+                ("classes2.dex", attach_map_list(b_wall.build())),
+            ],
+        );
+        run_cli(Cli::parse_from([
+            "dex-patcher",
+            "patch-inspiration-aod-gate",
+            "--file",
+            wall_apk.to_str().unwrap(),
+        ]))
+        .unwrap();
+        let wall_zip = fs::read(&wall_apk).unwrap();
+        verify_zip_alignment_4(&wall_zip).unwrap();
+        let mut wall_za = zip::ZipArchive::new(std::io::Cursor::new(wall_zip)).unwrap();
+        let mut asset_bytes = Vec::new();
+        std::io::Read::read_to_end(&mut wall_za.by_name("assets/untouched.dex").unwrap(), &mut asset_bytes).unwrap();
+        assert_eq!(asset_bytes, b"dex\n035\0untouched_asset");
+
+        // 4. OppoGallery2.apk: hook-move-result alias for ro.product.first_api_level -> 0x22
+        let mut b_gal = DexBuilder::new();
+        b_gal.add_class("Lcom/coloros/gallery/ApiLevelHelper;", "Ljava/lang/Object;");
+        b_gal.add_string("ro.product.first_api_level");
+        b_gal.add_method_ref("Landroid/os/SystemProperties;", "getInt", &["Ljava/lang/String;", "I"], "I");
+        b_gal.add_method_ref("Lcom/coloros/gallery/ApiLevelHelper;", "getFirstApiLevel", &[], "I");
+        let tmp_gal = DexFile::parse(b_gal.build()).unwrap();
+        let gal_key_idx = tmp_gal
+            .strings
+            .iter()
+            .position(|s| s == "ro.product.first_api_level")
+            .unwrap() as u16;
+        let gal_get_int_idx = (0..tmp_gal.methods.len())
+            .find(|&i| tmp_gal.get_method_signature(i as u32).map(|(_, n, _)| n == "getInt").unwrap_or(false))
+            .unwrap() as u16;
+        b_gal.add_method(MethodSpec {
+            class_desc: "Lcom/coloros/gallery/ApiLevelHelper;".to_string(),
+            name: "getFirstApiLevel".to_string(),
+            params: vec![],
+            return_type: "I".to_string(),
+            access_flags: 0x0001 | ACC_STATIC,
+            is_direct: true,
+            registers_size: 2,
+            ins_size: 0,
+            outs_size: 2,
+            insns: vec![0x001a, gal_key_idx, 0x0112, 0x2071, gal_get_int_idx, 0x0010, 0x000a, 0x000f],
+            tries_size: 0,
+            tries_and_handlers: Vec::new(),
+        });
+        let gallery_apk = make_apk("OppoGallery2.apk", vec![("classes.dex", attach_map_list(b_gal.build()))]);
+        run_cli(Cli::parse_from([
+            "dex-patcher",
+            "hook-move-result",
+            "--file",
+            gallery_apk.to_str().unwrap(),
+            "--string",
+            "ro.product.first_api_level",
+            "--value",
+            "0x22",
+            "--require",
+        ]))
+        .unwrap();
+        let gallery_zip = fs::read(&gallery_apk).unwrap();
+        verify_zip_alignment_4(&gallery_zip).unwrap();
+
+        // 5. HeyTapSpeechAssist.apk: require-stub + require-sget verified via batch
+        let mut b_speech_1 = DexBuilder::new();
+        b_speech_1.add_class("Lcom/heytap/speechassist/aicall/setting/config/AiCallCommonBean;", "Ljava/lang/Object;");
+        b_speech_1.add_method(MethodSpec {
+            class_desc: "Lcom/heytap/speechassist/aicall/setting/config/AiCallCommonBean;".to_string(),
+            name: "getSupportAiCall".to_string(),
+            params: vec![],
+            return_type: "Z".to_string(),
+            access_flags: 0x0001,
+            is_direct: false,
+            registers_size: 2,
+            ins_size: 1,
+            outs_size: 0,
+            insns: vec![0x0012, 0x000f],
+            tries_size: 0,
+            tries_and_handlers: Vec::new(),
+        });
+        let mut b_speech_2 = DexBuilder::new();
+        b_speech_2.add_class("Lcom/heytap/speechassist/ModelGate;", "Ljava/lang/Object;");
+        b_speech_2.add_field_ref("Landroid/os/Build;", "MODEL", "Ljava/lang/String;");
+        b_speech_2.add_method_ref("Lcom/heytap/speechassist/ModelGate;", "getModel", &[], "Ljava/lang/String;");
+        let tmp_sp2 = DexFile::parse(b_speech_2.build()).unwrap();
+        let sp_model_idx = (0..tmp_sp2.fields.len())
+            .find(|&i| tmp_sp2.get_field_signature(i as u32).map(|(_, n, _)| n == "MODEL").unwrap_or(false))
+            .unwrap() as u16;
+        b_speech_2.add_method(MethodSpec {
+            class_desc: "Lcom/heytap/speechassist/ModelGate;".to_string(),
+            name: "getModel".to_string(),
+            params: vec![],
+            return_type: "Ljava/lang/String;".to_string(),
+            access_flags: 0x0001 | ACC_STATIC,
+            is_direct: true,
+            registers_size: 1,
+            ins_size: 0,
+            outs_size: 0,
+            insns: vec![0x0062, sp_model_idx, 0x0011],
+            tries_size: 0,
+            tries_and_handlers: Vec::new(),
+        });
+        let speech_apk = make_apk(
+            "HeyTapSpeechAssist.apk",
+            vec![
+                ("classes.dex", attach_map_list(b_speech_1.build())),
+                ("classes2.dex", attach_map_list(b_speech_2.build())),
+            ],
+        );
+        run_cli(Cli::parse_from([
+            "dex-patcher",
+            "batch",
+            "--file",
+            speech_apk.to_str().unwrap(),
+            "--require-stub",
+            "AiCallCommonBean::getSupportAiCall=true",
+            "--require-sget",
+            "Landroid/os/Build;->MODEL=PLG110",
+        ]))
+        .unwrap();
+        let speech_zip = fs::read(&speech_apk).unwrap();
+        verify_zip_alignment_4(&speech_zip).unwrap();
+        let mut speech_za = zip::ZipArchive::new(std::io::Cursor::new(speech_zip)).unwrap();
+        let mut dex2_out = Vec::new();
+        std::io::Read::read_to_end(&mut speech_za.by_name("classes2.dex").unwrap(), &mut dex2_out).unwrap();
+        assert_strict_mapped_dex_valid(&dex2_out);
     }
 }

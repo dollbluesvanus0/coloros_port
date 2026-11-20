@@ -1,12 +1,14 @@
 """Tests for APK backend resolution and per-artifact overrides in functions.sh."""
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipUnless(shutil.which('bash'), 'bash is not installed')
 class ApkBackendResolutionTests(unittest.TestCase):
     def run_bash_functions(self, script, env_overrides=None):
         env = dict(os.environ)

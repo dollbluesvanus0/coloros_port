@@ -1,5 +1,6 @@
 """Tests for ZIP validation logic used in CI workflows and ROM verification."""
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@unittest.skipUnless(shutil.which('bash') and shutil.which('unzip'), 'bash and unzip are required')
 class ZipValidationTests(unittest.TestCase):
     def run_validate_zip(self, zip_path):
         script = '''

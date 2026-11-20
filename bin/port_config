@@ -26,6 +26,10 @@ pack_method=ota
 # or 1..32. PORT_PACK_JOBS overrides this setting; 1 keeps packing sequential.
 pack_jobs=auto
 
+# Concurrent APK/JAR patching: auto (min(cpus, 4)), or 1..32.
+# PORT_PATCH_JOBS overrides this setting; 1 keeps patching sequential.
+patch_jobs=auto
+
 #ddr_type=ddr5
 
 #给其他机型移植时，已近处理过的包，可以复用，不用再处理。

@@ -4,6 +4,14 @@
 PORT_PERFORMANCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
 port_tree_size_bytes() {
+    local rc=127
+    if type run_rom_ops >/dev/null 2>&1; then
+        run_rom_ops tree-size "$1"
+        rc=$?
+        if (( rc != 127 )); then
+            return "${rc}"
+        fi
+    fi
     python3 "${PORT_PERFORMANCE_ROOT}/bin/tree_size.py" "$1"
 }
 
@@ -76,6 +84,42 @@ port_pack_job_count() {
             jobs=1
         fi
     fi
+    printf '%s\n' "${jobs}"
+}
+
+port_extract_job_count() {
+    local requested="${PORT_EXTRACT_JOBS:-auto}" cpus="${1:-1}" jobs=4
+    if [[ "${requested}" != auto ]]; then
+        if [[ ! "${requested}" =~ ^[1-9][0-9]?$ ]] || (( requested > 32 )); then
+            printf 'PORT_EXTRACT_JOBS must be auto or an integer from 1 to 32\n' >&2
+            return 2
+        fi
+        printf '%s\n' "${requested}"
+        return 0
+    fi
+    (( cpus < jobs )) && jobs="${cpus}"
+    (( jobs < 1 )) && jobs=1
+    printf '%s\n' "${jobs}"
+}
+
+port_patch_job_count() {
+    local requested="${PORT_PATCH_JOBS:-auto}" cpus="${1:-1}" jobs=4 memory_kb
+    if [[ "${requested}" != auto ]]; then
+        if [[ ! "${requested}" =~ ^[1-9][0-9]?$ ]] || (( requested > 32 )); then
+            printf 'PORT_PATCH_JOBS must be auto or an integer from 1 to 32\n' >&2
+            return 2
+        fi
+        printf '%s\n' "${requested}"
+        return 0
+    fi
+    (( cpus < jobs )) && jobs="${cpus}"
+    if [[ -r /proc/meminfo ]]; then
+        memory_kb="$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo)"
+        if [[ "${memory_kb}" =~ ^[0-9]+$ ]] && (( memory_kb < 3 * 1024 * 1024 )) && (( jobs > 2 )); then
+            jobs=2
+        fi
+    fi
+    (( jobs < 1 )) && jobs=1
     printf '%s\n' "${jobs}"
 }
 

@@ -1,0 +1,21 @@
+[package]
+name = "xml-tool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Batch XML feature and config processor for ColorOS/OxygenOS ROM porting"
+
+[[bin]]
+name = "xml-tool"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+coloros-common.workspace = true
+rayon.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

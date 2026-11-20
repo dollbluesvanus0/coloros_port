@@ -9,10 +9,9 @@ use std::path::Path;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-/// Returns `true` if `entry_name` is a DEX file inside an APK/JAR (e.g. `classes.dex`, `classes2.dex`).
+/// Returns `true` if `entry_name` is a top-level DEX file inside an APK/JAR (e.g. `classes.dex`, `classes2.dex`).
 pub fn is_dex_entry_name(entry_name: &str) -> bool {
-    let base = entry_name.rsplit('/').next().unwrap_or(entry_name);
-    (base.starts_with("classes") && base.ends_with(".dex")) || base.ends_with(".dex")
+    !entry_name.contains('/') && entry_name.starts_with("classes") && entry_name.ends_with(".dex")
 }
 
 /// Returns `true` if `entry_name` should be stored uncompressed and 4-byte aligned in an APK/JAR.

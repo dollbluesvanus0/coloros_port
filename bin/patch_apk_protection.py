@@ -93,7 +93,7 @@ def patch_apk_protection(decompiled_dir: Path | str) -> dict[str, list[str]]:
         text = smali_file.read_text(encoding="utf-8", errors="ignore")
         new_text, changed = patch_apk_signature_verifier(text)
         if changed:
-            smali_file.write_text(new_text, encoding="utf-8")
+            smali_file.write_text(new_text, encoding="utf-8", newline="")
             patched_records.setdefault(str(smali_file), []).append("ApkSignatureVerifier")
             print(f"[+] Patched ApkSignatureVerifier in {smali_file}")
 

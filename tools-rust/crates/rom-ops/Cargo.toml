@@ -1,0 +1,21 @@
+[package]
+name = "rom-ops"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Native Rust replacements for hot ROM porting helpers (tree-size, debloat, patch-vbmeta, strip-non-ascii)"
+
+[[bin]]
+name = "rom-ops"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+coloros-common.workspace = true
+rayon.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

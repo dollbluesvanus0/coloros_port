@@ -12,7 +12,7 @@ def patch_engineer(root: Path) -> Path:
     if len(candidates) != 1:
         raise ValueError(f'Expected one OplusEngineerFwService.smali, found {len(candidates)}')
     target = candidates[0]
-    source = target.read_text()
+    source = target.read_text(encoding='utf-8')
     matches = list(METHOD.finditer(source))
     if len(matches) != 1:
         raise ValueError(f'Expected one onBootPhase(I)V in {target}, found {len(matches)}')
@@ -21,7 +21,7 @@ def patch_engineer(root: Path) -> Path:
         raise ValueError('Cannot replace an abstract/native onBootPhase method')
     result = METHOD.sub(lambda m: m.group(1) + '    .locals 0\n    return-void\n.end method', source, count=1)
     if result != source:
-        target.write_text(result)
+        target.write_text(result, encoding='utf-8', newline='')
     print(f'COS17: OplusEngineerFwService.onBootPhase(I)V -> return-void ({target})')
     return target
 
