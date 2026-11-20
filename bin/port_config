@@ -30,6 +30,16 @@ pack_jobs=auto
 # PORT_PATCH_JOBS overrides this setting; 1 keeps patching sequential.
 patch_jobs=auto
 
+# OTA payload generation engine for A/B devices:
+# auto (rust payload-gen -> delta_generator -> ota_from_target_files),
+# rust (coloros-tools payload-gen), delta (direct delta_generator), stock (ota_from_target_files).
+# PORT_OTA_ENGINE overrides this setting.
+ota_engine=auto
+
+# Payload compression for rust payload-gen: fast-xz (default), xz, bz2, none.
+# PORT_PAYLOAD_COMPRESSION overrides this setting.
+payload_compression=fast-xz
+
 #ddr_type=ddr5
 
 #给其他机型移植时，已近处理过的包，可以复用，不用再处理。

@@ -42,6 +42,9 @@ enum Commands {
     /// Stage 6: Native ROM ops (tree-size, debloat, patch-vbmeta, strip-non-ascii)
     #[command(visible_aliases = ["romops"])]
     RomOps(rom_ops::Cli),
+    /// Stage 7: Parallel Android A/B OTA CrAU v2 payload.bin generator & packager
+    #[command(visible_aliases = ["payload_gen", "payloadgen"])]
+    PayloadGen(payload_gen::Cli),
 }
 
 /// Dispatch CLI invocation from an arbitrary argument iterator (`argv[0..n]`).
@@ -121,6 +124,10 @@ where
                 let sub = rom_ops::Cli::try_parse_from(&args_vec)?;
                 return rom_ops::run_cli(sub);
             }
+            "payload-gen" | "payload_gen" | "payloadgen" => {
+                let sub = payload_gen::Cli::try_parse_from(&args_vec)?;
+                return payload_gen::run_cli(sub);
+            }
             _ => {}
         }
     }
@@ -133,6 +140,7 @@ where
         Commands::PropTool(sub) => prop_tool::run_cli(sub),
         Commands::XmlTool(sub) => xml_tool::run_cli(sub),
         Commands::RomOps(sub) => rom_ops::run_cli(sub),
+        Commands::PayloadGen(sub) => payload_gen::run_cli(sub),
     }
 }
 
@@ -320,5 +328,37 @@ mod tests {
 
         run_from_args(["coloros-tools", "rom-ops", "tree-size", dir.path().to_str().unwrap()])
             .unwrap();
+    }
+
+    #[test]
+    fn test_dispatcher_payload_gen_and_multicall() {
+        let dir = tempdir().unwrap();
+        let img_dir = dir.path().join("IMAGES");
+        fs::create_dir_all(&img_dir).unwrap();
+        fs::write(img_dir.join("vbmeta.img"), vec![0xAAu8; 4096]).unwrap();
+        let out_bin = dir.path().join("payload.bin");
+
+        run_from_args([
+            "payload-gen",
+            "generate",
+            "--images-dir",
+            img_dir.to_str().unwrap(),
+            "--partitions",
+            "vbmeta",
+            "--out-file",
+            out_bin.to_str().unwrap(),
+            "--compression",
+            "none",
+        ])
+        .unwrap();
+
+        run_from_args([
+            "coloros-tools",
+            "payload-gen",
+            "verify",
+            "--file",
+            out_bin.to_str().unwrap(),
+        ])
+        .unwrap();
     }
 }

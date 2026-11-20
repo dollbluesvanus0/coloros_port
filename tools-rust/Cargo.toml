@@ -8,6 +8,7 @@ members = [
     "crates/prop-tool",
     "crates/xml-tool",
     "crates/rom-ops",
+    "crates/payload-gen",
 ]
 
 [workspace.package]
@@ -27,7 +28,10 @@ jwalk = "0.8"
 memmap2 = "0.9"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 sha1 = "0.10"
+sha2 = "0.11"
 adler2 = "2.0"
+lzma-rust2 = "0.25"
+bzip2 = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.12"
@@ -38,6 +42,7 @@ smali-patcher = { path = "crates/smali-patcher" }
 prop-tool = { path = "crates/prop-tool" }
 xml-tool = { path = "crates/xml-tool" }
 rom-ops = { path = "crates/rom-ops" }
+payload-gen = { path = "crates/payload-gen" }
 
 [package]
 name = "coloros-tools"
@@ -61,6 +66,7 @@ smali-patcher.workspace = true
 prop-tool.workspace = true
 xml-tool.workspace = true
 rom-ops.workspace = true
+payload-gen.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

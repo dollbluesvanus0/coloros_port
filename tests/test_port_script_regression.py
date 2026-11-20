@@ -96,6 +96,27 @@ class PortScriptStaticRegressionTests(unittest.TestCase):
             self.assertIn(helper, self.port_text)
             self.assertIn(f'{helper}()', self.functions_text)
 
+    def test_ota_payload_gen_and_parallel_map_wiring(self):
+        self.assertIn('ota_engine=auto', self.config_text)
+        self.assertIn('payload_compression=fast-xz', self.config_text)
+        self.assertIn('PORT_OTA_ENGINE', self.port_text)
+        self.assertIn('PORT_PAYLOAD_COMPRESSION', self.port_text)
+        self.assertIn('_port::generate_map_file', self.port_text)
+        self.assertIn('_port::generate_map_file()', self.functions_text)
+        self.assertIn('LC_ALL=C sort', self.port_text)
+        for fn_name in (
+            'run_payload_gen',
+            '_port::write_ota_metadata',
+            '_port::sign_ota_zip',
+            '_port::package_and_sign_ota_zip',
+            '_port::build_ab_ota_rust',
+            '_port::build_ab_ota_delta',
+        ):
+            self.assertIn(f'{fn_name}()', self.functions_text)
+        self.assertIn('_port::build_ab_ota_rust', self.port_text)
+        self.assertIn('_port::build_ab_ota_delta', self.port_text)
+        self.assertIn('PORT_DISABLE_PAYLOAD_GEN', self.functions_text)
+
     def test_setup_sh_installs_jq_and_dos2unix_on_all_platforms(self):
         for line_marker in ('x86_64', 'aarch64', 'Darwin'):
             self.assertIn(line_marker, self.setup_text)
@@ -116,6 +137,7 @@ class PortScriptStaticRegressionTests(unittest.TestCase):
             'prop-tool',
             'xml-tool',
             'rom-ops',
+            'payload-gen',
         )
         port_rom_yml = (ROOT / '.github/workflows/port-rom.yml').read_text(encoding='utf-8')
         rust_tools_yml = (ROOT / '.github/workflows/rust-tools.yml').read_text(encoding='utf-8')
@@ -149,8 +171,11 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             'PORT_DISABLE_PROP_TOOL',
             'PORT_DISABLE_XML_TOOL',
             'PORT_DISABLE_ROM_OPS',
+            'PORT_DISABLE_PAYLOAD_GEN',
             'PORT_EXTRACT_JOBS',
             'PORT_PATCH_JOBS',
+            'PORT_OTA_ENGINE',
+            'PORT_PAYLOAD_COMPRESSION',
         ):
             env.pop(key, None)
         if env_overrides:
@@ -184,7 +209,7 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             bin_dir = Path(td) / 'bin'
             bin_dir.mkdir()
-            for tool in ('xml-tool', 'rom-ops', 'prop-tool', 'dex-patcher'):
+            for tool in ('xml-tool', 'rom-ops', 'prop-tool', 'dex-patcher', 'payload-gen'):
                 exe = bin_dir / tool
                 exe.write_text(f'#!/usr/bin/env bash\necho "{tool}:$*"\n', encoding='utf-8')
                 exe.chmod(0o755)
@@ -198,6 +223,7 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
                 run_rom_ops tree-size /tmp
                 run_prop_tool batch-dir --dir /tmp
                 run_dex_patcher stub-method --file app.apk
+                run_payload_gen generate --images-dir /tmp
                 ''',
             )
             self.assertEqual(res.returncode, 0, res.stderr)
@@ -206,12 +232,13 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             self.assertIn('rom-ops:tree-size /tmp', lines)
             self.assertIn('prop-tool:batch-dir --dir /tmp', lines)
             self.assertIn('dex-patcher:stub-method --file app.apk', lines)
+            self.assertIn('payload-gen:generate --images-dir /tmp', lines)
 
             # Disabled flags must force exit 127 for transparent legacy fallback
             res_disabled = self.run_bash(
                 '''
                 source functions.sh
-                for fn in run_xml_tool run_rom_ops run_prop_tool run_dex_patcher; do
+                for fn in run_xml_tool run_rom_ops run_prop_tool run_dex_patcher run_payload_gen _port::build_ab_ota_rust; do
                     "$fn" --help
                     echo "$fn:$?"
                 done
@@ -221,6 +248,7 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
                     'PORT_DISABLE_ROM_OPS': 'true',
                     'PORT_DISABLE_PROP_TOOL': 'true',
                     'PORT_DISABLE_DEX_PATCHER': 'true',
+                    'PORT_DISABLE_PAYLOAD_GEN': 'true',
                 },
             )
             self.assertEqual(res_disabled.returncode, 0, res_disabled.stderr)
@@ -231,6 +259,8 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
                     'run_rom_ops:127',
                     'run_prop_tool:127',
                     'run_dex_patcher:127',
+                    'run_payload_gen:127',
+                    '_port::build_ab_ota_rust:127',
                 ],
             )
 
@@ -260,6 +290,7 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
                 }}
                 run_xml_tool delete-elements --tag foo
                 run_rom_ops strip-non-ascii file.txt
+                run_payload_gen verify --file p.bin
                 if command -v python3 >/dev/null 2>&1; then
                     PORT_DISABLE_ROM_OPS=true port_tree_size_bytes "{(root / 'sample').as_posix()}"
                 else
@@ -271,7 +302,44 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             lines = res.stdout.strip().splitlines()
             self.assertIn('multicall:xml-tool delete-elements --tag foo', lines)
             self.assertIn('multicall:rom-ops strip-non-ascii file.txt', lines)
+            self.assertIn('multicall:payload-gen verify --file p.bin', lines)
             self.assertIn('5', lines)
+
+    def test_write_ota_metadata_helper(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tf = root / 'target_files'
+            (tf / 'SYSTEM').mkdir(parents=True)
+            (tf / 'SYSTEM/build.prop').write_text(
+                '\n'.join([
+                    'ro.build.fingerprint=OnePlus/PJZ110/OP5CF9L1:16/UKQ1.231108.001/T.1:user/release-keys',
+                    'ro.build.version.incremental=16.0.0.100',
+                    'ro.build.version.sdk=36',
+                    'ro.build.version.security_patch=2026-08-05',
+                    'ro.build.date.utc=1755000000',
+                    'ro.product.device=RE54E4L1',
+                ]) + '\n',
+                encoding='utf-8',
+            )
+            out_meta = root / 'metadata'
+            res = self.run_bash(
+                f'''
+                source functions.sh
+                _port::write_ota_metadata "{tf.as_posix()}" "{out_meta.as_posix()}"
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            meta = dict(
+                line.split('=', 1)
+                for line in out_meta.read_text(encoding='utf-8').splitlines()
+                if '=' in line
+            )
+            self.assertEqual(meta['ota-type'], 'AB')
+            self.assertEqual(meta['ota-required-cache'], '0')
+            self.assertEqual(meta['post-sdk-level'], '36')
+            self.assertEqual(meta['post-security-patch-level'], '2026-08-05')
+            self.assertEqual(meta['post-timestamp'], '1755000000')
+            self.assertEqual(meta['pre-device'], 'RE54E4L1')
 
     def test_extract_and_patch_job_count_validation(self):
         res = self.run_bash(

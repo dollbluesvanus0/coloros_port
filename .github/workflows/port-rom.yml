@@ -131,7 +131,7 @@ jobs:
             cargo build --release --manifest-path tools-rust/Cargo.toml
             mkdir -p bin/Linux/x86_64
             cp -f tools-rust/target/release/coloros-tools bin/Linux/x86_64/coloros-tools
-            for tool in rom-fs-patcher dex-patcher smali-patcher prop-tool xml-tool rom-ops; do
+            for tool in rom-fs-patcher dex-patcher smali-patcher prop-tool xml-tool rom-ops payload-gen; do
               ln -sf coloros-tools "bin/Linux/x86_64/${tool}"
             done
           fi

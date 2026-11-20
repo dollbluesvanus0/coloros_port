@@ -115,6 +115,26 @@ port_pack_job_count "$(port_cpu_count)" >/dev/null || exit 2
 PORT_PATCH_JOBS="${PORT_PATCH_JOBS:-$(port_config_get patch_jobs auto)}"
 export PORT_PATCH_JOBS
 port_patch_job_count "$(port_cpu_count)" >/dev/null || exit 2
+ota_engine="${PORT_OTA_ENGINE:-$(port_config_get ota_engine auto)}"
+ota_engine="$(_port::lower "${ota_engine}")"
+case "${ota_engine}" in
+    auto|rust|delta|stock) ;;
+    *)
+        error "ota_engine 必须为 auto、rust、delta 或 stock" "ota_engine must be auto, rust, delta, or stock"
+        exit 2
+        ;;
+esac
+export PORT_OTA_ENGINE="${ota_engine}"
+payload_compression="${PORT_PAYLOAD_COMPRESSION:-$(port_config_get payload_compression fast-xz)}"
+payload_compression="$(_port::lower "${payload_compression}")"
+case "${payload_compression}" in
+    fast-xz|xz|bz2|none) ;;
+    *)
+        error "payload_compression 必须为 fast-xz、xz、bz2 或 none" "payload_compression must be fast-xz, xz, bz2, or none"
+        exit 2
+        ;;
+esac
+export PORT_PAYLOAD_COMPRESSION="${payload_compression}"
 _norm_pack_method="$(printf '%s' "${pack_method}" | tr '[:upper:]' '[:lower:]')"
 if [[ "${_norm_pack_method}" == "fastboot" ]]; then
     pack_method="fastboot"
@@ -2680,14 +2700,28 @@ if [[ $pack_method == "stock" ]];then
     rm -rf out/target/product/${base_product_device}/META/ab_partitions.txt
     rm -rf out/target/product/${base_product_device}/META/update_engine_config.txt
     rm -rf out/target/product/${base_product_device}/target-file.zip
-    for part in out/target/product/${base_product_device}/IMAGES/*.img; do
+    _map_targets=()
+    super_list_info=""
+    while IFS= read -r part; do
+        [[ -f "${part}" ]] || continue
         partname=$(basename "$part" .img)
-        echo $partname >> out/target/product/${base_product_device}/META/ab_partitions.txt
-        if echo $super_list | grep -q -w "$partname"; then
+        echo "$partname" >> "out/target/product/${base_product_device}/META/ab_partitions.txt"
+        if echo "$super_list" | grep -q -w "$partname"; then
             super_list_info+="$partname "
-            otatools/bin/map_file_generator $part ${part%.*}.map
+            _map_targets+=("$partname")
         fi
-    done 
+    done < <(printf '%s\n' out/target/product/${base_product_device}/IMAGES/*.img | LC_ALL=C sort)
+    if [[ ${#_map_targets[@]} -gt 0 ]]; then
+        _map_jobs="$(port_cpu_count)"
+        (( _map_jobs > 32 )) && _map_jobs=32
+        PORT_OTA_IMAGES_DIR="${work_dir}/out/target/product/${base_product_device}/IMAGES"
+        export PORT_OTA_IMAGES_DIR
+        blue "并行生成分区 .map 文件 (${_map_jobs} 线程)" "Generating partition .map files in parallel (${_map_jobs} job(s))"
+        port_run_jobs "${_map_jobs}" "${work_dir}/build/logs/map-gen" _port::generate_map_file "${_map_targets[@]}" || {
+            error "生成 .map 文件失败" "Failed to generate partition .map files"
+            exit 1
+        }
+    fi
     rm -rf out/target/product/${base_product_device}/META/dynamic_partitions_info.txt
     let groupSize=superSize-1048576
     {
@@ -2795,11 +2829,44 @@ if [[ $pack_method == "stock" ]];then
         mkdir -p tmp
         df -h .
     fi
-    pushd otatools || exit 1
-    export PATH=$(pwd)/bin/:$PATH
-    mkdir -p ${work_dir}/out/$target_folder
-    ./bin/ota_from_target_files --partial= --force_minor_version 9 "${work_dir}/out/target/product/${base_product_device}/" "${work_dir}/out/${base_product_device}-ota_full-${port_rom_version}-user-${port_android_version}.0.zip" || exit 1
-    popd
+    mkdir -p "${work_dir}/out/${target_folder}"
+    _ota_target_files="${work_dir}/out/target/product/${base_product_device}"
+    _ota_out_zip="${work_dir}/out/${base_product_device}-ota_full-${port_rom_version}-user-${port_android_version}.0.zip"
+    _ota_built=false
+    if [[ "${is_ab_device}" == true ]]; then
+        case "${ota_engine}" in
+            rust)
+                _port::build_ab_ota_rust "${_ota_target_files}" "${_ota_out_zip}" || {
+                    error "Rust payload-gen 不可用或生成 OTA 失败" "Rust payload-gen unavailable or OTA generation failed"
+                    exit 1
+                }
+                _ota_built=true
+                ;;
+            delta)
+                _port::build_ab_ota_delta "${_ota_target_files}" "${_ota_out_zip}" || {
+                    error "delta_generator 不可用或生成 OTA 失败" "delta_generator unavailable or OTA generation failed"
+                    exit 1
+                }
+                _ota_built=true
+                ;;
+            auto)
+                if type _port::build_ab_ota_rust >/dev/null 2>&1 && _port::build_ab_ota_rust "${_ota_target_files}" "${_ota_out_zip}"; then
+                    _ota_built=true
+                elif _port::build_ab_ota_delta "${_ota_target_files}" "${_ota_out_zip}"; then
+                    _ota_built=true
+                else
+                    yellow "快速 A/B OTA 路径不可用，回退到 ota_from_target_files" "Fast A/B OTA path unavailable; falling back to ota_from_target_files"
+                fi
+                ;;
+            stock) ;;
+        esac
+    fi
+    if [[ "${_ota_built}" != true ]]; then
+        pushd otatools || exit 1
+        export PATH=$(pwd)/bin/:$PATH
+        ./bin/ota_from_target_files --partial= --force_minor_version 9 "${_ota_target_files}/" "${_ota_out_zip}" || exit 1
+        popd
+    fi
     ziphash="$(port_sha256_file "out/${base_product_device}-ota_full-${port_rom_version}-user-${port_android_version}.0.zip")" || exit 1
     ziphash="${ziphash:0:10}"
     mv -f out/${base_product_device}-ota_full-${port_rom_version}-user-${port_android_version}.0.zip out/$target_folder/ota_full-${rom_version}-${port_product_model}-${pack_timestamp}-$regionmark-${portrom_version_security_patch}-${ziphash}.zip

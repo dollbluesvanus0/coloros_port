@@ -247,6 +247,20 @@ run_rom_ops() {
     fi
 }
 
+run_payload_gen() {
+    if [[ "${PORT_DISABLE_PAYLOAD_GEN:-false}" == "true" ]]; then
+        return 127
+    fi
+    local bin=""
+    if bin="$(_port::resolve_rust_bin payload-gen)"; then
+        "${bin}" "$@"
+    elif bin="$(_port::resolve_rust_bin coloros-tools)"; then
+        "${bin}" payload-gen "$@"
+    else
+        return 127
+    fi
+}
+
 smali_kit="run_smali_kit"
 
 _port::lower() {
@@ -4579,4 +4593,278 @@ _port::patch_apk_worker() {
             return 1
             ;;
     esac
+}
+
+_port::generate_map_file() {
+    local partname="$1"
+    local root_dir="${work_dir:-$(pwd)}"
+    local images_dir="${PORT_OTA_IMAGES_DIR:-${root_dir}/out/target/product/${base_product_device:-unknown}/IMAGES}"
+    local img="${images_dir}/${partname}.img"
+    local map="${images_dir}/${partname}.map"
+    local map_gen="${root_dir}/otatools/bin/map_file_generator"
+    [[ -f "${img}" && -x "${map_gen}" ]] || return 1
+    LD_LIBRARY_PATH="${root_dir}/otatools/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+        "${map_gen}" "${img}" "${map}"
+}
+
+_port::read_target_prop() {
+    local target_files="$1"
+    local key="$2"
+    local default_val="${3:-}"
+    local prop_file value=""
+    for prop_file in \
+        "${target_files}/SYSTEM/build.prop" \
+        "${target_files}/MY_MANIFEST/build.prop" \
+        "${target_files}/PRODUCT/build.prop" \
+        "${target_files}/SYSTEM_EXT/build.prop" \
+        "${target_files}/VENDOR/build.prop"; do
+        [[ -f "${prop_file}" ]] || continue
+        value="$(grep -m1 -E "^${key}=" "${prop_file}" 2>/dev/null | cut -d'=' -f2- | tr -d '\r\n')"
+        if [[ -n "${value}" ]]; then
+            printf '%s\n' "${value}"
+            return 0
+        fi
+    done
+    printf '%s\n' "${default_val}"
+}
+
+_port::write_ota_metadata() {
+    local target_files="$1"
+    local metadata_out="$2"
+    local post_build post_incremental post_sdk post_spl post_ts pre_device
+    post_build="$(_port::read_target_prop "${target_files}" "ro.build.fingerprint" "${target_display_id:-unknown}")"
+    post_incremental="$(_port::read_target_prop "${target_files}" "ro.build.version.incremental" "${port_rom_version:-0}")"
+    post_sdk="$(_port::read_target_prop "${target_files}" "ro.build.version.sdk" "${port_android_sdk:-35}")"
+    post_spl="$(_port::read_target_prop "${target_files}" "ro.build.version.security_patch" "${portrom_version_security_patch:-}")"
+    post_ts="$(_port::read_target_prop "${target_files}" "ro.build.date.utc" "$(date +%s)")"
+    pre_device="$(_port::read_target_prop "${target_files}" "ro.product.device" "${base_product_device:-unknown}")"
+
+    mkdir -p -- "$(dirname -- "${metadata_out}")" || return 1
+    {
+        printf 'ota-required-cache=0\n'
+        printf 'ota-type=AB\n'
+        printf 'post-build=%s\n' "${post_build}"
+        printf 'post-build-incremental=%s\n' "${post_incremental}"
+        printf 'post-sdk-level=%s\n' "${post_sdk}"
+        [[ -n "${post_spl}" ]] && printf 'post-security-patch-level=%s\n' "${post_spl}"
+        printf 'post-timestamp=%s\n' "${post_ts}"
+        printf 'pre-device=%s\n' "${pre_device}"
+    } > "${metadata_out}"
+}
+
+_port::sign_ota_zip() {
+    local unsigned_zip="$1"
+    local out_zip="$2"
+    local root_dir="${work_dir:-$(pwd)}"
+    local signapk_jar="${root_dir}/otatools/framework/signapk.jar"
+    local lib64="${root_dir}/otatools/lib64"
+    local cert="${root_dir}/otatools/key/testkey.x509.pem"
+    local key="${root_dir}/otatools/key/testkey.pk8"
+
+    [[ -f "${unsigned_zip}" && -f "${signapk_jar}" && -f "${cert}" && -f "${key}" ]] || return 1
+    command -v java >/dev/null 2>&1 || return 1
+    mkdir -p -- "$(dirname -- "${out_zip}")" || return 1
+    rm -f -- "${out_zip}"
+    LD_LIBRARY_PATH="${lib64}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+        java -Xmx2048m "-Djava.library.path=${lib64}" -jar "${signapk_jar}" -w "${cert}" "${key}" "${unsigned_zip}" "${out_zip}" || {
+        rm -f -- "${out_zip}"
+        return 1
+    }
+    [[ -s "${out_zip}" ]]
+}
+
+_port::package_and_sign_ota_zip() {
+    local stage_dir="$1"
+    local out_zip="$2"
+    local unsigned_zip="${out_zip}.unsigned.zip"
+
+    command -v zip >/dev/null 2>&1 || return 1
+    mkdir -p -- "$(dirname -- "${out_zip}")" || return 1
+    rm -f -- "${unsigned_zip}" "${out_zip}"
+    (
+        cd "${stage_dir}" || exit 1
+        zip -0 -r -q "${unsigned_zip}" .
+    ) || { rm -f -- "${unsigned_zip}"; return 1; }
+
+    _port::sign_ota_zip "${unsigned_zip}" "${out_zip}"
+    local rc=$?
+    rm -f -- "${unsigned_zip}"
+    return "${rc}"
+}
+
+_port::build_ab_ota_rust() {
+    local target_files="$1"
+    local out_zip="$2"
+    if [[ "${PORT_DISABLE_PAYLOAD_GEN:-false}" == "true" ]]; then
+        return 127
+    fi
+    if ! _port::resolve_rust_bin payload-gen >/dev/null 2>&1 && \
+       ! _port::resolve_rust_bin coloros-tools >/dev/null 2>&1; then
+        return 127
+    fi
+
+    local root_dir="${work_dir:-$(pwd)}"
+    local key_pk8="${root_dir}/otatools/key/testkey.pk8"
+    local cert_pem="${root_dir}/otatools/key/testkey.x509.pem"
+    local signapk_jar="${root_dir}/otatools/framework/signapk.jar"
+    local ab_list="${target_files}/META/ab_partitions.txt"
+    local dyn_info="${target_files}/META/dynamic_partitions_info.txt"
+    local apex_info="${target_files}/META/apex_info.pb"
+    local care_map="${target_files}/META/care_map.pb"
+    local comp="${PORT_PAYLOAD_COMPRESSION:-${payload_compression:-fast-xz}}"
+
+    [[ -f "${key_pk8}" && -f "${cert_pem}" && -f "${signapk_jar}" && -f "${ab_list}" ]] || return 127
+    command -v java >/dev/null 2>&1 || return 127
+
+    local part img_path part_csv=""
+    while IFS= read -r part; do
+        part="${part#"${part%%[![:space:]]*}"}"
+        part="${part%"${part##*[![:space:]]}"}"
+        [[ -n "${part}" ]] || continue
+        img_path="${target_files}/IMAGES/${part}.img"
+        [[ -f "${img_path}" ]] || continue
+        part_csv="${part_csv:+${part_csv},}${part}"
+    done < "${ab_list}"
+    [[ -n "${part_csv}" ]] || return 1
+
+    local stage_dir
+    mkdir -p -- "${root_dir}/tmp" || return 1
+    stage_dir="$(mktemp -d "${root_dir}/tmp/ota-rust.XXXXXX")" || return 1
+    local unsigned_zip="${out_zip}.unsigned.zip"
+    (
+        trap 'rm -rf -- "${stage_dir}" "${unsigned_zip}"' EXIT
+        local payload_bin="${stage_dir}/payload.bin"
+        local payload_props="${stage_dir}/payload_properties.txt"
+        local metadata_file="${stage_dir}/metadata"
+        local cpus
+        cpus="$(port_cpu_count)"
+
+        _port::write_ota_metadata "${target_files}" "${metadata_file}" || exit 1
+
+        local -a pg_args=(
+            "generate"
+            "--images-dir" "${target_files}/IMAGES"
+            "--partitions" "${part_csv}"
+            "--out-file" "${payload_bin}"
+            "--properties-out" "${payload_props}"
+            "--private-key" "${key_pk8}"
+            "--compression" "${comp}"
+            "--major-version" "2"
+            "--minor-version" "0"
+            "--threads" "${cpus}"
+            "--ota-zip" "${unsigned_zip}"
+            "--metadata-file" "${metadata_file}"
+        )
+        [[ -f "${dyn_info}" ]] && pg_args+=("--dynamic-partitions-info" "${dyn_info}")
+        [[ -f "${apex_info}" ]] && pg_args+=("--apex-info" "${apex_info}")
+        [[ -f "${care_map}" ]] && pg_args+=("--care-map" "${care_map}")
+
+        blue "使用 Rust payload-gen 生成 A/B OTA (${comp}, ${cpus} 线程)" \
+             "Building A/B OTA via Rust payload-gen (${comp}, ${cpus} thread(s))"
+        run_payload_gen "${pg_args[@]}"
+        local rc=$?
+        if [[ ${rc} -ne 0 ]]; then
+            exit "${rc}"
+        fi
+        # Free temporary payload.bin before signapk copies into final signed ZIP.
+        rm -f -- "${payload_bin}" "${payload_props}" "${metadata_file}"
+        _port::sign_ota_zip "${unsigned_zip}" "${out_zip}" || exit 1
+    )
+}
+
+_port::build_ab_ota_delta() {
+    local target_files="$1"
+    local out_zip="$2"
+    local root_dir="${work_dir:-$(pwd)}"
+    local dg_bin="${root_dir}/otatools/bin/delta_generator"
+    local key_pk8="${root_dir}/otatools/key/testkey.pk8"
+    local cert_pem="${root_dir}/otatools/key/testkey.x509.pem"
+    local signapk_jar="${root_dir}/otatools/framework/signapk.jar"
+    local ab_list="${target_files}/META/ab_partitions.txt"
+    local dyn_info="${target_files}/META/dynamic_partitions_info.txt"
+    local apex_info="${target_files}/META/apex_info.pb"
+
+    [[ -x "${dg_bin}" && -f "${key_pk8}" && -f "${cert_pem}" && -f "${signapk_jar}" && -f "${ab_list}" ]] || return 127
+    command -v openssl >/dev/null 2>&1 || return 127
+    command -v zip >/dev/null 2>&1 || return 127
+    command -v java >/dev/null 2>&1 || return 127
+
+    local part img_path map_path
+    local partition_names="" new_partitions="" new_mapfiles=""
+    while IFS= read -r part; do
+        part="${part#"${part%%[![:space:]]*}"}"
+        part="${part%"${part##*[![:space:]]}"}"
+        [[ -n "${part}" ]] || continue
+        img_path="${target_files}/IMAGES/${part}.img"
+        [[ -f "${img_path}" ]] || continue
+        map_path="${target_files}/IMAGES/${part}.map"
+        if [[ -n "${partition_names}" ]]; then
+            partition_names+=":"
+            new_partitions+=":"
+            new_mapfiles+=":"
+        fi
+        partition_names+="${part}"
+        new_partitions+="${img_path}"
+        [[ -s "${map_path}" ]] && new_mapfiles+="${map_path}"
+    done < "${ab_list}"
+    [[ -n "${partition_names}" ]] || return 1
+
+    local stage_dir
+    mkdir -p -- "${root_dir}/tmp" || return 1
+    stage_dir="$(mktemp -d "${root_dir}/tmp/ota-delta.XXXXXX")" || return 1
+    (
+        trap 'rm -rf -- "${stage_dir}"' EXIT
+        local key_pem="${stage_dir}/testkey.pem"
+        local unsigned_payload="${stage_dir}/payload.unsigned.bin"
+        local payload_bin="${stage_dir}/payload.bin"
+        local payload_props="${stage_dir}/payload_properties.txt"
+        local payload_hash="${stage_dir}/payload.hash"
+        local metadata_hash="${stage_dir}/metadata.hash"
+        local payload_sig="${stage_dir}/payload.sig"
+        local metadata_sig="${stage_dir}/metadata.sig"
+        local cpus
+        cpus="$(port_cpu_count)"
+
+        # testkey.pk8 matches testkey.x509.pem; convert DER PKCS#8 for openssl pkeyutl.
+        openssl pkcs8 -inform DER -nocrypt -in "${key_pk8}" -out "${key_pem}" || exit 1
+
+        blue "使用 delta_generator 直出 A/B OTA (${cpus} 线程)" \
+             "Building A/B OTA via direct delta_generator (${cpus} thread(s))"
+
+        export LD_LIBRARY_PATH="${root_dir}/otatools/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        local -a dg_args=(
+            "--out_file=${unsigned_payload}"
+            "--partition_names=${partition_names}"
+            "--new_partitions=${new_partitions}"
+            "--new_mapfiles=${new_mapfiles}"
+            "--major_version=2"
+            "--max_threads=${cpus}"
+        )
+        [[ -f "${dyn_info}" ]] && dg_args+=("--dynamic_partition_info_file=${dyn_info}")
+        [[ -f "${apex_info}" ]] && dg_args+=("--apex_info_file=${apex_info}")
+
+        "${dg_bin}" "${dg_args[@]}" || exit 1
+        "${dg_bin}" \
+            "--in_file=${unsigned_payload}" \
+            "--signature_size=256" \
+            "--out_hash_file=${payload_hash}" \
+            "--out_metadata_hash_file=${metadata_hash}" || exit 1
+        openssl pkeyutl -sign -inkey "${key_pem}" -pkeyopt digest:sha256 \
+            -in "${payload_hash}" -out "${payload_sig}" || exit 1
+        openssl pkeyutl -sign -inkey "${key_pem}" -pkeyopt digest:sha256 \
+            -in "${metadata_hash}" -out "${metadata_sig}" || exit 1
+        "${dg_bin}" \
+            "--in_file=${unsigned_payload}" \
+            "--signature_size=256" \
+            "--payload_signature_file=${payload_sig}" \
+            "--metadata_signature_file=${metadata_sig}" \
+            "--out_file=${payload_bin}" || exit 1
+        rm -f -- "${key_pem}" "${unsigned_payload}" "${payload_hash}" "${metadata_hash}" "${payload_sig}" "${metadata_sig}"
+        "${dg_bin}" \
+            "--in_file=${payload_bin}" \
+            "--properties_file=${payload_props}" || exit 1
+
+        _port::write_ota_metadata "${target_files}" "${stage_dir}/META-INF/com/android/metadata" || exit 1
+        _port::package_and_sign_ota_zip "${stage_dir}" "${out_zip}" || exit 1
+    )
 }

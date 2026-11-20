@@ -55,7 +55,8 @@ EROFS остаются `lz4hc,12`.
 инструменты вместо последовательных вызовов JVM, `xmlstarlet`, `sed`, `perl` и
 Python. Если бинарники не собраны или отключены через `PORT_DISABLE_*=true`
 (`PORT_DISABLE_DEX_PATCHER`, `PORT_DISABLE_PROP_TOOL`, `PORT_DISABLE_XML_TOOL`,
-`PORT_DISABLE_ROM_OPS`), сохраняется прозрачный откат на прежние инструменты:
+`PORT_DISABLE_ROM_OPS`, `PORT_DISABLE_PAYLOAD_GEN`), сохраняется прозрачный откат
+на прежние инструменты:
 
 - `xml-tool` (`crates/xml-tool`): пакетное добавление и удаление фич
   (`add-features`, `remove-features` с дедупликацией и проверкой `baserom`),
@@ -72,6 +73,30 @@ Python. Если бинарники не собраны или отключен�
   (`zipalign`) без запуска JVM/apktool/APKEditor для `services.jar`,
   `framework.jar`, `oplus-services.jar`, `OplusLauncher.apk`, `Aod.apk`,
   `Wallpapers.apk`, `OppoGallery2.apk` и `HeyTapSpeechAssist.apk`.
+- `payload-gen` (`crates/payload-gen`): многопоточная генерация и подпись
+  Android OTA `CrAU` v2 `payload.bin` напрямую из `.img`-разделов (`memmap2`
+  + `rayon`, пропуск нулевых блоков через `ZERO`, упаковка `ZIP_STORED` в OTA
+  ZIP без лишнего промежуточного копирования) с последующей подписью архива
+  через `signapk.jar`.
+
+## Генерация OTA (`payload-gen`, `delta_generator` и `.map`)
+
+- **Параллельный `map_file_generator`**: для A/B OTA файлы `.map` создаются
+  параллельно через `port_run_jobs` (до 32 задач по числу CPU), сохраняя
+  детерминированный порядок разделов (`LC_ALL=C sort`) в `META/ab_partitions.txt`
+  и `super_list_info`. Журналы сохраняются в `build/logs/map-gen/<раздел>.log`.
+- **Выбор движка A/B OTA (`ota_engine` / `PORT_OTA_ENGINE`)**:
+  - `auto` (по умолчанию в `bin/port_config`): сначала пробует Rust
+    `payload-gen`, при отсутствии бинарника (`rc=127`) или ошибке переходит на
+    прямой `otatools/bin/delta_generator` (подпись ключом `otatools/key/testkey.pk8`
+    + `zip -0` + `signapk.jar`), а при невозможности — на стандартный
+    `ota_from_target_files`. Для устройств без A/B (`is_ab_device == false`)
+    используется `ota_from_target_files`.
+  - `rust`, `delta`, `stock`: принудительный выбор конкретного движка без
+    скрытого отката на другие.
+- **Сжатие payload (`payload_compression` / `PORT_PAYLOAD_COMPRESSION`)**:
+  `fast-xz` (по умолчанию — быстрый XZ уровня 1 с CRC32 для совместимости с
+  `update_engine`), `xz` (уровень 6), `bz2` и `none`.
 
 Дополнительные изменения:
 

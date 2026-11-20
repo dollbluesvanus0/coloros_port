@@ -37,12 +37,15 @@ Workflow **Port ROM** запускает существующий `port.sh` вр
 не вызывает повторную загрузку уже принятого файла.
 
 Настройки упаковки и числа параллельных задач берутся из `bin/port_config`
-выбранной ветки (`pack_jobs`, `patch_jobs`). Зависимости (включая `jq` и
-`dos2unix`) устанавливаются отдельно от `setup.sh`, без полного обновления ОС.
-Сборка Rust-инструментов `coloros-tools` и всех multicall-алиасов
-(`rom-fs-patcher`, `dex-patcher`, `smali-patcher`, `prop-tool`, `xml-tool`,
-`rom-ops`) в **Port ROM** использует кэш Cargo (`actions/cache@v4` для
-`tools-rust/target` и индексов `~/.cargo`), что ускоряет повторные запуски.
+выбранной ветки (`pack_jobs`, `patch_jobs`, `ota_engine`, `payload_compression`).
+Зависимости (включая `jq` и `dos2unix`) устанавливаются отдельно от `setup.sh`,
+без полного обновления ОС. Сборка Rust-инструментов `coloros-tools` и всех
+multicall-алиасов (`rom-fs-patcher`, `dex-patcher`, `smali-patcher`,
+`prop-tool`, `xml-tool`, `rom-ops`, `payload-gen`) в **Port ROM** использует
+кэш Cargo (`actions/cache@v4` для `tools-rust/target` и индексов `~/.cargo`),
+что ускоряет повторные запуски. После сборки `coloros-tools` запускается полный
+набор тестов (`python3 -m unittest discover -s tests -v`), включая проверку
+совместимости `payload-gen` с `otatools/bin/delta_generator` на Linux x86_64.
 Workflow **Build Rust Tools** также собирает и публикует в артефактах все
 указанные бинарники и алиасы с кэшированием через `Swatinem/rust-cache@v2`, а
 workflow **Check Port Scripts** проверяет синтаксис `bash -n` всех shell-скриптов

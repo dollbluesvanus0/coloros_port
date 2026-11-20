@@ -1,0 +1,26 @@
+[package]
+name = "payload-gen"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Parallel Android A/B OTA CrAU v2 payload.bin generator, signer, and OTA packager"
+
+[[bin]]
+name = "payload-gen"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+bzip2.workspace = true
+clap.workspace = true
+coloros-common.workspace = true
+lzma-rust2.workspace = true
+memmap2.workspace = true
+rayon.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
