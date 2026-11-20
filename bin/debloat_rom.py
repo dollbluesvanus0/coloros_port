@@ -14,7 +14,7 @@ def debloat(root: Path, manifest: Path) -> list[str]:
             continue
         pattern_path = Path(pattern)
         parts = pattern_path.parts
-        if len(parts) < 2 or parts[0] not in ('my_product', 'my_stock', 'my_preload') or '..' in parts or pattern_path.is_absolute() or pattern_path.drive:
+        if len(parts) < 2 or parts[0] not in ('my_product', 'my_stock', 'my_preload', 'system_ext') or '..' in parts or pattern_path.is_absolute() or pattern_path.drive:
             raise ValueError(f'Unsafe debloat path: {pattern}')
         for path in root.glob(pattern):
             # Resolve the parent only: an escaping leaf symlink may be

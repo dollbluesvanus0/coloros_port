@@ -1391,6 +1391,8 @@ add_prop_from_port() {
         fi
 
         if ! awk -F'=' -v property="$key" '$1 == property { found = 1; exit } END { exit !found }' "$base_build_prop"; then
+            # Deduplicate repeated port keys (latest definition wins cleanly).
+            sed -i "\|^${key}=|d" "$temp_file" 2>/dev/null
             echo "$key=$value" >> "$temp_file"
             blue "新增: $key=$value" "Added: $key=$value"
         fi
@@ -2458,6 +2460,52 @@ ensure_android_ext_shared_library() {
     if [[ -f "${fs_config}" ]] && ! grep -qF 'my_bigball/non_overlay/app/GoogleExtShared' "${fs_config}"; then
         printf '%s\t0 0 755\n' 'my_bigball/non_overlay/app/GoogleExtShared' >> "${fs_config}"
     fi
+}
+
+ensure_oplus_camera_unit_sdk_permission() {
+    local image_root="build/portrom/images"
+    local overlay_jar="${image_root}/my_product/product_overlay/framework/com.oplus.camera.unit.sdk.jar"
+    local product_jar="${image_root}/product/framework/com.oplus.camera.unit.sdk.jar"
+    if [[ ! -f "${overlay_jar}" && ! -f "${product_jar}" ]]; then
+        return 0
+    fi
+
+    local perm_dir
+    for perm_dir in \
+        "${image_root}/system/system/etc/permissions" \
+        "${image_root}/system_ext/etc/permissions" \
+        "${image_root}/product/etc/permissions" \
+        "${image_root}/my_product/etc/permissions" \
+        "${image_root}/my_product/product_overlay/etc/permissions" \
+        "${image_root}/my_stock/etc/permissions"; do
+        [[ -d "${perm_dir}" ]] || continue
+        if grep -R -q 'name="com\.oplus\.camera\.unit\.sdk"' "${perm_dir}" 2>/dev/null; then
+            return 0
+        fi
+    done
+
+    local target_xml="${image_root}/my_product/etc/permissions/com.oplus.camera.unit.sdk.xml"
+    mkdir -p "$(dirname "${target_xml}")" || return 1
+    cat <<'EOF' > "${target_xml}"
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <library name="com.oplus.camera.unit.sdk"
+        file="/product/framework/com.oplus.camera.unit.sdk.jar" />
+</permissions>
+EOF
+    chmod 0644 "${target_xml}" 2>/dev/null || true
+
+    local contexts="${image_root}/config/my_product_file_contexts"
+    local fs_config="${image_root}/config/my_product_fs_config"
+    if [[ -f "${contexts}" ]] && ! grep -qF '/my_product/etc/permissions/com\.oplus\.camera\.unit\.sdk\.xml' "${contexts}"; then
+        printf '%s u:object_r:system_file:s0\n' \
+            '/my_product/etc/permissions/com\.oplus\.camera\.unit\.sdk\.xml' >> "${contexts}"
+    fi
+    if [[ -f "${fs_config}" ]] && ! grep -qF 'my_product/etc/permissions/com.oplus.camera.unit.sdk.xml' "${fs_config}"; then
+        printf '%s 0 0 0644\n' 'my_product/etc/permissions/com.oplus.camera.unit.sdk.xml' >> "${fs_config}"
+    fi
+    blue "已补充 OplusCamera unit SDK 共享库权限声明" \
+        "Installed OplusCamera unit SDK shared-library permission XML"
 }
 
 # Android 17 ports that retain a Qualcomm/Oplus HIDL IMS declaration need the
@@ -3637,6 +3685,106 @@ _port::stage_postdata_compat() {
     green "Android 17 OplusWifiResource.apk 修复并签名完成" \
         "Android 17 OplusWifiResource.apk rebuilt and signed"
     return 0
+}
+
+_port::stage_rom_optimizations() {
+    local image_root="build/portrom/images"
+    [[ -d "${image_root}" ]] || return 0
+
+    # Ensure OplusCamera's shared library XML is declared whenever its JAR exists.
+    ensure_oplus_camera_unit_sdk_permission || return 1
+
+    # Match Oplus USAP intent in system build.prop to avoid disabled USAP pool.
+    local sys_prop="${image_root}/system/system/build.prop"
+    if [[ -f "${sys_prop}" ]] && grep -q '^dalvik\.vm\.usap_pool_enabled=' "${sys_prop}"; then
+        run_prop_tool batch --file "${sys_prop}" --set-existing "dalvik.vm.usap_pool_enabled=true"
+        local _usap_rc=$?
+        if [[ ${_usap_rc} -eq 127 ]]; then
+            sed -i 's|^dalvik\.vm\.usap_pool_enabled=.*|dalvik.vm.usap_pool_enabled=true|' "${sys_prop}" || return 1
+        elif [[ ${_usap_rc} -ne 0 ]]; then
+            return "${_usap_rc}"
+        fi
+    fi
+
+    # Install SELinux-safe init tuning using only init-permitted paths (cgroup,
+    # proc, sysfs_dm) so Enforcing builds incur zero AVC denials.
+    if [[ -d "${image_root}/system_ext/etc" ]]; then
+        local init_dir="${image_root}/system_ext/etc/init"
+        local rc_file="${init_dir}/coloros_port_tuning.rc"
+        mkdir -p "${init_dir}" || return 1
+        cat <<'EOF' > "${rc_file}"
+# ColorOS Port runtime VM and device-mapper readahead tuning
+on property:sys.boot_completed=1
+    write /dev/memcg/apps/memory.swappiness 80
+    write /dev/memcg/system/memory.swappiness 60
+    write /proc/sys/vm/swappiness 80
+    write /proc/sys/vm/vfs_cache_pressure 80
+    write /proc/sys/vm/page-cluster 0
+    write /sys/block/dm-0/queue/read_ahead_kb 128
+    write /sys/block/dm-1/queue/read_ahead_kb 128
+    write /sys/block/dm-2/queue/read_ahead_kb 128
+    write /sys/block/dm-3/queue/read_ahead_kb 128
+    write /sys/block/dm-4/queue/read_ahead_kb 128
+    write /sys/block/dm-5/queue/read_ahead_kb 128
+    write /sys/block/dm-6/queue/read_ahead_kb 128
+    write /sys/block/dm-7/queue/read_ahead_kb 128
+    write /sys/block/dm-8/queue/read_ahead_kb 128
+    write /sys/block/dm-9/queue/read_ahead_kb 128
+    write /sys/block/dm-10/queue/read_ahead_kb 128
+    write /sys/block/dm-11/queue/read_ahead_kb 128
+    write /sys/block/dm-12/queue/read_ahead_kb 128
+    write /sys/block/dm-13/queue/read_ahead_kb 128
+    write /sys/block/dm-14/queue/read_ahead_kb 128
+    write /sys/block/dm-15/queue/read_ahead_kb 128
+    write /sys/block/dm-16/queue/read_ahead_kb 128
+    write /sys/block/dm-17/queue/read_ahead_kb 128
+    write /sys/block/dm-73/queue/read_ahead_kb 128
+EOF
+        chmod 0644 "${rc_file}" 2>/dev/null || true
+
+        local se_contexts="${image_root}/config/system_ext_file_contexts"
+        local se_fs_config="${image_root}/config/system_ext_fs_config"
+        if [[ -f "${se_contexts}" ]] && ! grep -qF '/system_ext/etc/init/coloros_port_tuning\.rc' "${se_contexts}"; then
+            printf '%s u:object_r:system_file:s0\n' \
+                '/system_ext/etc/init/coloros_port_tuning\.rc' >> "${se_contexts}"
+        fi
+        if [[ -f "${se_fs_config}" ]] && ! grep -qF 'system_ext/etc/init/coloros_port_tuning.rc' "${se_fs_config}"; then
+            printf '%s 0 0 0644\n' 'system_ext/etc/init/coloros_port_tuning.rc' >> "${se_fs_config}"
+        fi
+    fi
+
+    # Reduce excessive 512KB/1024KB readahead and BFQ overhead on UFS/userdata
+    # inside vendor post-boot scripts when vendor image is unpacked.
+    local post_boot
+    for post_boot in "${image_root}/vendor/bin"/init.kernel.post_boot-*.sh; do
+        [[ -f "${post_boot}" ]] || continue
+        grep -q 'configure_read_ahead_kb_values' "${post_boot}" || continue
+        grep -qF '# coloros_port_io_tuning' "${post_boot}" && continue
+        awk '
+            /^function configure_read_ahead_kb_values/ || /^configure_read_ahead_kb_values\(\)/ {
+                in_fn = 1
+            }
+            in_fn && /ra_kb=512/ {
+                sub(/ra_kb=512/, "ra_kb=128")
+            }
+            in_fn && /^\}/ {
+                print "    # coloros_port_io_tuning"
+                print "    for sdq in /sys/block/sd*/queue; do"
+                print "        [ -d \"$sdq\" ] || continue"
+                print "        echo 128 > \"$sdq/read_ahead_kb\" 2>/dev/null"
+                print "        echo none > \"$sdq/scheduler\" 2>/dev/null || echo mq-deadline > \"$sdq/scheduler\" 2>/dev/null"
+                print "        echo 0 > \"$sdq/iostats\" 2>/dev/null"
+                print "    done"
+                print "    [ -w /proc/sys/vm/watermark_scale_factor ] && echo 10 > /proc/sys/vm/watermark_scale_factor 2>/dev/null"
+                in_fn = 0
+            }
+            { print }
+        ' "${post_boot}" > "${post_boot}.tmp" && mv -f -- "${post_boot}.tmp" "${post_boot}" || return 1
+        chmod 0755 "${post_boot}" 2>/dev/null || true
+    done
+
+    blue "已应用 ROM I/O、VM 与 USAP 启动优化" \
+        "Applied ROM I/O, VM, and USAP boot optimizations"
 }
 _port::stage_patch_teesim() {
     local src="devices/common/oplus_identity_teesim"

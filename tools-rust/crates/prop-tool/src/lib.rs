@@ -3,7 +3,7 @@
 //! Replaces slow line-by-line `sed`/`awk`/`grep` loops in `port.sh` and `functions.sh`
 //! with an order-preserving Android `build.prop` parser/mutator and `fstab` cleaner.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -483,6 +483,7 @@ pub fn compute_port_additions(base: &PropFile, port: &PropFile) -> Vec<(String, 
         .collect();
 
     let mut additions: Vec<(String, String)> = Vec::new();
+    let mut seen_port_idx: HashMap<String, usize> = HashMap::new();
 
     for line in &port.lines {
         if let PropLine::Property { key, value, .. } = line {
@@ -490,7 +491,12 @@ pub fn compute_port_additions(base: &PropFile, port: &PropFile) -> Vec<(String, 
                 continue;
             }
             if !base_keys.contains(key.as_str()) {
-                additions.push((key.clone(), value.clone()));
+                if let Some(&idx) = seen_port_idx.get(key.as_str()) {
+                    additions[idx].1 = value.clone();
+                } else {
+                    seen_port_idx.insert(key.clone(), additions.len());
+                    additions.push((key.clone(), value.clone()));
+                }
             }
         }
     }
@@ -1817,5 +1823,22 @@ odm /odm ext4 ro,barrier=1,discard wait,avb=vbmeta_a,logical,first_stage_mount
         assert_eq!(bruce_after.get("ro.keep.base"), Some("2"));
         assert_eq!(bruce_after.get("ro.drop.nonbase"), None);
         assert_eq!(port_after.get("ro.force.del"), None);
+    }
+
+    #[test]
+    fn test_merge_props_deduplicates_repeated_port_keys() {
+        let base = PropFile::parse("ro.base.only=1\n");
+        let port = PropFile::parse(
+            "ro.dup.key=first\nro.unique.port=yes\nro.dup.key=second\n",
+        );
+        let (_, bruce) = merge_props_with_bruce(&base, &port);
+        let dup_count = bruce
+            .lines
+            .iter()
+            .filter(|l| matches!(l, PropLine::Property { key, .. } if key == "ro.dup.key"))
+            .count();
+        assert_eq!(dup_count, 1);
+        assert_eq!(bruce.get("ro.dup.key"), Some("second"));
+        assert_eq!(bruce.get("ro.unique.port"), Some("yes"));
     }
 }

@@ -72,3 +72,21 @@ class DebloatTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_debloat(manifest)
         self.assertTrue(target.exists())
+
+    def test_manifest_includes_case_fixed_and_system_ext_bloat(self):
+        manifest_text = MANIFEST.read_text(encoding='utf-8').splitlines()
+        for expected in (
+            'my_stock/del-app/KeKeUserCenterMember',
+            'my_stock/priv-app/KeKeAppDetail',
+            'my_stock/priv-app/KeKeMarket',
+            'my_stock/priv-app/DCS',
+            'my_stock/priv-app/DRS',
+            'my_stock/app/MSPService',
+            'system_ext/app/LogTrialCommercial',
+        ):
+            self.assertIn(expected, manifest_text)
+        keep_sys_ext = self.put('system_ext/app/PowerMonitor/PowerMonitor.apk')
+        drop_sys_ext = self.put('system_ext/app/LogTrialCommercial/LogTrialCommercial.apk')
+        self.run_debloat()
+        self.assertTrue(keep_sys_ext.exists())
+        self.assertFalse(drop_sys_ext.exists())

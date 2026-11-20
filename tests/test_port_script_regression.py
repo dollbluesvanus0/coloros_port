@@ -362,6 +362,73 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    def test_rom_optimization_and_camera_unit_sdk_permission_helpers(self):
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('ensure_oplus_camera_unit_sdk_permission', port_text)
+        self.assertIn('_port::stage_rom_optimizations', port_text)
+        self.assertIn('debug.sf.oplus_display_trace.enable', port_text)
+        self.assertIn('ro.audio.voiplog.on', port_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            img = root / 'build' / 'portrom' / 'images'
+            jar = img / 'my_product' / 'product_overlay' / 'framework' / 'com.oplus.camera.unit.sdk.jar'
+            jar.parent.mkdir(parents=True, exist_ok=True)
+            jar.write_bytes(b'jar')
+            cfg = img / 'config'
+            cfg.mkdir(parents=True, exist_ok=True)
+            (cfg / 'my_product_file_contexts').write_text('', encoding='utf-8')
+            (cfg / 'my_product_fs_config').write_text('', encoding='utf-8')
+            (cfg / 'system_ext_file_contexts').write_text('', encoding='utf-8')
+            (cfg / 'system_ext_fs_config').write_text('', encoding='utf-8')
+            sys_prop = img / 'system' / 'system' / 'build.prop'
+            sys_prop.parent.mkdir(parents=True, exist_ok=True)
+            sys_prop.write_text('dalvik.vm.usap_pool_enabled=false\n', encoding='utf-8')
+            (img / 'system_ext' / 'etc').mkdir(parents=True, exist_ok=True)
+            post_boot = img / 'vendor' / 'bin' / 'init.kernel.post_boot-taro.sh'
+            post_boot.parent.mkdir(parents=True, exist_ok=True)
+            post_boot.write_text(
+                'function configure_read_ahead_kb_values() {\n'
+                '    if [ $MemTotal -le 3145728 ]; then\n'
+                '        ra_kb=128\n'
+                '    else\n'
+                '        ra_kb=512\n'
+                '    fi\n'
+                '}\n',
+                encoding='utf-8',
+            )
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                _port::stage_rom_optimizations || exit 2
+                # Idempotent second pass
+                _port::stage_rom_optimizations || exit 3
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+            cam_xml = (img / 'my_product' / 'etc' / 'permissions' / 'com.oplus.camera.unit.sdk.xml').read_text(encoding='utf-8')
+            self.assertIn('name="com.oplus.camera.unit.sdk"', cam_xml)
+            self.assertIn('/product/framework/com.oplus.camera.unit.sdk.jar', cam_xml)
+            cam_ctx = (cfg / 'my_product_file_contexts').read_text(encoding='utf-8')
+            self.assertEqual(cam_ctx.count('com\\.oplus\\.camera\\.unit\\.sdk\\.xml'), 1)
+
+            self.assertIn('dalvik.vm.usap_pool_enabled=true', sys_prop.read_text(encoding='utf-8'))
+            rc_text = (img / 'system_ext' / 'etc' / 'init' / 'coloros_port_tuning.rc').read_text(encoding='utf-8')
+            self.assertIn('write /proc/sys/vm/swappiness 80', rc_text)
+            self.assertIn('write /sys/block/dm-0/queue/read_ahead_kb 128', rc_text)
+            se_ctx = (cfg / 'system_ext_file_contexts').read_text(encoding='utf-8')
+            self.assertEqual(se_ctx.count('coloros_port_tuning\\.rc'), 1)
+            se_fs = (cfg / 'system_ext_fs_config').read_text(encoding='utf-8')
+            self.assertEqual(se_fs.count('system_ext/etc/init/coloros_port_tuning.rc'), 1)
+
+            pb_text = post_boot.read_text(encoding='utf-8')
+            self.assertNotIn('ra_kb=512', pb_text)
+            self.assertIn('ra_kb=128', pb_text)
+            self.assertEqual(pb_text.count('# coloros_port_io_tuning'), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

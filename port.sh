@@ -1488,6 +1488,11 @@ EOF
         printf 'comment ro.lcd.display.screen\ncomment ro.display.brightness\ncomment ro.oplus.lcd.display\n'
     fi
     printf 'ro.oplus.game.camera.support_1_0=true\nro.oplus.audio.quiet_start=true\n'
+    printf 'debug.sf.oplus_display_trace.enable=0\n'
+    printf 'debug.oplus.systrace_enhance=false\n'
+    printf 'ro.audio.voiplog.on=false\n'
+    printf 'persist.device_config.runtime_native_boot.iorap_perfetto_enable=false\n'
+    printf 'ro.oplus.osense.uaf_vip_binder_enable=true\n'
     if [[ "$portIsOOS" == "true" ]]; then
         printf 'comment-force ro.oplus.camera.quickshare.support\n'
     fi
@@ -1535,6 +1540,11 @@ if [[ ${_prop_batch_v2_rc} -eq 127 ]]; then
 
     add_prop_v2 "ro.oplus.game.camera.support_1_0" "true"
     add_prop_v2 "ro.oplus.audio.quiet_start" "true"
+    add_prop_v2 "debug.sf.oplus_display_trace.enable" "0"
+    add_prop_v2 "debug.oplus.systrace_enhance" "false"
+    add_prop_v2 "ro.audio.voiplog.on" "false"
+    add_prop_v2 "persist.device_config.runtime_native_boot.iorap_perfetto_enable" "false"
+    add_prop_v2 "ro.oplus.osense.uaf_vip_binder_enable" "true"
     if [[ $portIsOOS == "true" ]];then
         remove_prop_v2 "ro.oplus.camera.quickshare.support" force
     fi
@@ -1559,7 +1569,7 @@ mkdir -p tmp/etc/permissions tmp/etc/extension
 cp -f build/portrom/images/my_product/etc/permissions/*.xml tmp/etc/permissions/
 cp -f build/portrom/images/my_product/etc/extension/*.xml tmp/etc/extension/
 cp -rf build/baserom/images/my_product/etc/permissions/*.xml build/portrom/images/my_product/etc/permissions/
-find tmp/etc/permissions/ -type f \( -name "multimedia*.xml" -o -name "*permissions*.xml" -o -name "*google*.xml"  -o -name "*configs*.xml" -o -name "*gsm*.xml" -o -name "feature_activity_preload.xml" -o -name "*gemini*.xml" -o -name "*gms*.xml" \) -exec cp -f {} build/portrom/images/my_product/etc/permissions/ \;
+find tmp/etc/permissions/ -type f \( -name "multimedia*.xml" -o -name "*permissions*.xml" -o -name "*google*.xml" -o -name "*configs*.xml" -o -name "*gsm*.xml" -o -name "feature_activity_preload.xml" -o -name "*gemini*.xml" -o -name "*gms*.xml" -o -name "*camera*.xml" \) -exec cp -f {} build/portrom/images/my_product/etc/permissions/ \;
 
 
 if [[ $regionmark != "CN" ]];then
@@ -2016,8 +2026,13 @@ else
         if [[ -d build/baserom/images/my_product/product_overlay/framework ]]; then
             cp -rf build/baserom/images/my_product/product_overlay/framework/* build/portrom/images/my_product/product_overlay/framework/
         fi
+        if [[ -d build/baserom/images/my_product/product_overlay/etc/permissions ]]; then
+            mkdir -p build/portrom/images/my_product/product_overlay/etc/permissions
+            cp -rf build/baserom/images/my_product/product_overlay/etc/permissions/* build/portrom/images/my_product/product_overlay/etc/permissions/
+        fi
     fi
  fi
+ensure_oplus_camera_unit_sdk_permission || exit 1
 
 if [[ ${base_device_family} == "OPSM8250" ]]; then
   camera_optimize_file=$(find build/portrom/images/ -type f -name "sys_camera_optimize_config.xml")
@@ -2121,22 +2136,42 @@ add_feature "oplus.software.display.reduce_brightness_rm_manual" build/portrom/i
 add_feature "oplus.software.display.brightness_memory_rm" build/portrom/images/my_product/etc/permissions/oplus.product.feature_multimedia_unique.xml
 add_feature "oplus.software.display.sec_max_brightness_rm" build/portrom/images/my_product/etc/permissions/oplus.product.feature_multimedia_unique.xml
 
-{
-    echo "# 新增属性"
-    echo "persist.lowbrightnessthreshold=0"
-    echo "persist.sys.renderengine.maxLuminance=500"
-
-    echo "ro.oplus.display.peak.brightness.duration_time=15"
-    echo "ro.oplus.display.peak.brightness.effect_interval_time=1800000"
-    echo "ro.oplus.display.peak.brightness.effect_times_every_day=2"
-    echo "ro.display.brightness.thread.priority=true"
-    echo "# 扬声器清理"
-    echo "ro.oplus.audio.speaker_clean=true"
-    echo "ro.vendor.oplus.radio.use_nitz_name=true"
-    # Fixeme A16 crash with AndroidRuntime: 	at com.android.server.display.feature.panel.OplusFeatureDCBacklight.applyApolloDCMode(OplusFeatureDCBacklight.java:300)
-    #echo "persist.brightness.apollo=1"
-
-} >> build/portrom/images/my_product/etc/bruce/build.prop
+_display_props_batch() {
+    cat <<'EOF'
+persist.lowbrightnessthreshold=0
+persist.sys.renderengine.maxLuminance=500
+ro.oplus.display.peak.brightness.duration_time=15
+ro.oplus.display.peak.brightness.effect_interval_time=1800000
+ro.oplus.display.peak.brightness.effect_times_every_day=2
+ro.display.brightness.thread.priority=true
+ro.oplus.audio.speaker_clean=true
+ro.vendor.oplus.radio.use_nitz_name=true
+EOF
+    if [[ $regionmark == "CN" ]]; then
+        printf 'ro.oplus.display.brightness.min_settings.rm=1,1,25,4.0,0\n'
+    fi
+}
+_display_props_batch | run_prop_tool batch \
+    --file build/portrom/images/my_product/build.prop \
+    --bruce-file build/portrom/images/my_product/etc/bruce/build.prop \
+    --base build/baserom/images/my_product/build.prop \
+    --stdin
+_display_props_rc=$?
+if [[ ${_display_props_rc} -eq 127 ]]; then
+    add_prop_v2 "persist.lowbrightnessthreshold" "0"
+    add_prop_v2 "persist.sys.renderengine.maxLuminance" "500"
+    add_prop_v2 "ro.oplus.display.peak.brightness.duration_time" "15"
+    add_prop_v2 "ro.oplus.display.peak.brightness.effect_interval_time" "1800000"
+    add_prop_v2 "ro.oplus.display.peak.brightness.effect_times_every_day" "2"
+    add_prop_v2 "ro.display.brightness.thread.priority" "true"
+    add_prop_v2 "ro.oplus.audio.speaker_clean" "true"
+    add_prop_v2 "ro.vendor.oplus.radio.use_nitz_name" "true"
+    if [[ $regionmark == "CN" ]]; then
+        add_prop_v2 "ro.oplus.display.brightness.min_settings.rm" "1,1,25,4.0,0"
+    fi
+elif [[ ${_display_props_rc} -ne 0 ]]; then
+    exit "${_display_props_rc}"
+fi
 
 if [[ ${base_product_device} == "OnePlus8Pro" ]] ;then 
     if [[ ${port_android_version} -gt 15 ]];then
@@ -2163,10 +2198,6 @@ if [[ ${base_product_device} == "OnePlus8Pro" ]] ;then
 } >> build/portrom/images/my_product/etc/bruce/build.prop
     fi
 fi
-
- if [[ $regionmark == "CN" ]];then
-     echo "ro.oplus.display.brightness.min_settings.rm=1,1,25,4.0,0" >> build/portrom/images/my_product/etc/bruce/build.prop
- fi
 
 
 if [[ -d build/baserom/images/my_product/etc/vibrator ]];then
@@ -2487,6 +2518,13 @@ fi
 # not ship that binary payload; absent assets are a clean no-op.
 if ! _port::stage_patch_teesim; then
     error "TEE simulator 集成失败" "TEE simulator integration failed"
+    exit 1
+fi
+
+# Apply runtime VM/I/O/USAP optimizations and camera library permission guards
+# before post-data compatibility and filesystem metadata generation.
+if ! _port::stage_rom_optimizations; then
+    error "ROM 运行时性能优化失败" "ROM runtime optimization stage failed"
     exit 1
 fi
 
