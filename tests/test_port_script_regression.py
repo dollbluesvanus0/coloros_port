@@ -80,7 +80,7 @@ class PortScriptStaticRegressionTests(unittest.TestCase):
         self.assertIn('_port::stage_postdata_compat()', self.functions_text)
 
     def test_port_sh_dependencies_and_parallel_wiring(self):
-        self.assertRegex(self.port_text, r'^check\b.*\bjq\b', re.MULTILINE)
+        self.assertRegex(self.port_text, re.compile(r'^check\b.*\bjq\b', re.MULTILINE))
         self.assertIn('check unix2dos', self.port_text)
 
         # Parallel baserom extraction & parallel APK patching
