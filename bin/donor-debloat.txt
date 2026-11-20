@@ -66,8 +66,6 @@ my_stock/priv-app/DCS
 my_stock/priv-app/DRS
 my_stock/priv-app/dmp
 my_stock/priv-app/HeyCast
-my_stock/priv-app/KeKeAppDetail
-my_stock/priv-app/KeKeMarket
 my_stock/priv-app/LinktoWindows
 my_stock/priv-app/NumberRecognition
 my_stock/priv-app/OCar
