@@ -153,6 +153,16 @@ remove_data_encryption="$(port_config_get remove_data_encryption false)"
 enable_ksu="$(port_config_get enable_ksu false)"
 ksu_repo_owner="$(port_config_get ksu_repo_owner tiann)"
 ksu_repo_name="$(port_config_get ksu_repo_name KernelSU)"
+install_via="$(_port::lower "$(port_config_get install_via true)")"
+install_play_store="$(_port::lower "$(port_config_get install_play_store true)")"
+install_kernelsu="$(_port::lower "$(port_config_get install_kernelsu true)")"
+for _app_flag_name in install_via install_play_store install_kernelsu; do
+    _app_flag_val="${!_app_flag_name}"
+    if [[ "${_app_flag_val}" != true && "${_app_flag_val}" != false ]]; then
+        error "${_app_flag_name} 必须为 true 或 false" "${_app_flag_name} must be true or false"
+        exit 2
+    fi
+done
 if [[ "${repackext4}" == true ]]; then
     pack_type=EXT
 elif [[ "${repackext4}" == false ]]; then
@@ -2504,6 +2514,13 @@ fi
 # not ship that binary payload; absent assets are a clean no-op.
 if ! _port::stage_patch_teesim; then
     error "TEE simulator 集成失败" "TEE simulator integration failed"
+    exit 1
+fi
+
+# Preinstall requested user/system applications (Via Browser, Google Play Store,
+# KernelSU Manager) before filesystem optimizations and metadata generation.
+if ! _port::install_preinstalled_apps; then
+    error "预装应用集成失败" "Preinstalled app integration failed"
     exit 1
 fi
 

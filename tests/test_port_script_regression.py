@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PORT_SH = ROOT / 'port.sh'
@@ -472,6 +473,58 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             self.assertEqual((port / 'my_product' / 'product_overlay' / 'framework' / 'com.oplus.camera.unit.sdk.jar').read_bytes(), b'stock-sdk')
             self.assertEqual((port / 'my_product' / 'etc' / 'camera' / 'cfg.xml').read_text(encoding='utf-8'), 'stock-cfg')
             self.assertTrue((port / 'my_product' / 'etc' / 'permissions' / 'com.oplus.camera.unit.sdk.xml').exists())
+
+    def test_install_preinstalled_apps_via_phonesky_and_kernelsu(self):
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        config_text = PORT_CONFIG.read_text(encoding='utf-8')
+        self.assertIn('_port::install_preinstalled_apps', port_text)
+        for key in ('install_via=true', 'install_play_store=true', 'install_kernelsu=true'):
+            self.assertIn(key, config_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = root / 'build' / 'portrom' / 'images'
+            (port / 'product').mkdir(parents=True, exist_ok=True)
+            (port / 'my_product' / 'priv-app' / 'GooglePlayServicesUpdater').mkdir(parents=True, exist_ok=True)
+            (port / 'my_product' / 'priv-app' / 'GooglePlayServicesUpdater' / 'GooglePlayServicesUpdater.apk').write_bytes(b'stub')
+            cn_gms = port / 'my_product' / 'etc' / 'permissions' / 'oplus_google_cn_gms_features.xml'
+            cn_gms.parent.mkdir(parents=True, exist_ok=True)
+            cn_gms.write_text(
+                '<permissions>\n'
+                '    <feature name="cn.google.services" />\n'
+                '    <feature name="com.google.android.feature.services_updater" />\n'
+                '</permissions>\n',
+                encoding='utf-8',
+            )
+
+            apps_src = root / 'devices' / 'common' / 'apps'
+            for app, extra in (('Via', None), ('Phonesky', None), ('KernelSU', 'lib/arm64-v8a/libksud.so')):
+                apk_path = apps_src / app / f'{app}.apk'
+                apk_path.parent.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(apk_path, 'w') as zf:
+                    zf.writestr('AndroidManifest.xml', f'<manifest package="{app}"/>')
+                    if extra:
+                        zf.writestr(extra, b'elf-so')
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                _port::install_preinstalled_apps || exit 2
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+            self.assertTrue((port / 'product' / 'app' / 'Via' / 'Via.apk').is_file())
+            self.assertTrue((port / 'product' / 'priv-app' / 'Phonesky' / 'Phonesky.apk').is_file())
+            self.assertFalse((port / 'my_product' / 'priv-app' / 'GooglePlayServicesUpdater').exists())
+            self.assertNotIn('services_updater', cn_gms.read_text(encoding='utf-8'))
+            self.assertIn('cn.google.services', cn_gms.read_text(encoding='utf-8'))
+            priv_xml = port / 'product' / 'etc' / 'permissions' / 'privapp-permissions-phonesky.xml'
+            self.assertTrue(priv_xml.is_file())
+            self.assertIn('com.android.vending', priv_xml.read_text(encoding='utf-8'))
+            self.assertTrue((port / 'product' / 'app' / 'KernelSU' / 'KernelSU.apk').is_file())
+            self.assertEqual((port / 'product' / 'app' / 'KernelSU' / 'lib' / 'arm64' / 'libksud.so').read_bytes(), b'elf-so')
 
 
 if __name__ == '__main__':

@@ -3868,6 +3868,265 @@ EOF
     blue "已应用 ROM I/O、VM 与 USAP 启动优化" \
         "Applied ROM I/O, VM, and USAP boot optimizations"
 }
+
+_port::download_valid_apk() {
+    local url="$1"
+    local dest="$2"
+    local min_bytes="${3:-65536}"
+    local tmp_file="${dest}.tmp.$$"
+
+    mkdir -p "$(dirname "${dest}")" || return 1
+    rm -f -- "${tmp_file}"
+
+    if ! curl -fsSL --connect-timeout 15 --max-time 240 --retry 2 -- "${url}" -o "${tmp_file}"; then
+        rm -f -- "${tmp_file}"
+        return 1
+    fi
+
+    local actual_size
+    actual_size="$(wc -c < "${tmp_file}" 2>/dev/null || printf '0')"
+    if [[ ! "${actual_size}" =~ ^[0-9]+$ ]] || (( actual_size < min_bytes )); then
+        rm -f -- "${tmp_file}"
+        return 1
+    fi
+
+    if command -v unzip >/dev/null 2>&1; then
+        if ! unzip -tq "${tmp_file}" >/dev/null 2>&1; then
+            rm -f -- "${tmp_file}"
+            return 1
+        fi
+    fi
+
+    mv -f -- "${tmp_file}" "${dest}" || { rm -f -- "${tmp_file}"; return 1; }
+    return 0
+}
+
+_port::find_local_preinstall_apk() {
+    local root="${work_dir:-.}"
+    local candidate matched=""
+    for candidate in "$@"; do
+        if [[ -f "${root}/${candidate}" ]]; then
+            printf '%s\n' "${root}/${candidate}"
+            return 0
+        fi
+        matched="$(find "${root}/${candidate}" -maxdepth 1 -type f -name '*.apk' -print -quit 2>/dev/null)"
+        if [[ -n "${matched}" && -f "${matched}" ]]; then
+            printf '%s\n' "${matched}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_port::install_apk_to_partition() {
+    local apk_src="$1"
+    local app_name="$2"
+    local rel_parent="$3"
+    local target_dir="build/portrom/images/${rel_parent}/${app_name}"
+    local target_apk="${target_dir}/${app_name}.apk"
+
+    [[ -f "${apk_src}" ]] || return 1
+    rm -rf -- "${target_dir}" || return 1
+    mkdir -p "${target_dir}" || return 1
+    cp -f -- "${apk_src}" "${target_apk}" || return 1
+    chmod 0644 "${target_apk}" 2>/dev/null || true
+
+    if command -v unzip >/dev/null 2>&1; then
+        if unzip -Z1 "${target_apk}" 2>/dev/null | grep -q '^lib/arm64-v8a/.*\.so$'; then
+            mkdir -p "${target_dir}/lib/arm64" || return 1
+            unzip -oq -j "${target_apk}" 'lib/arm64-v8a/*.so' -d "${target_dir}/lib/arm64" || return 1
+            chmod 0644 "${target_dir}/lib/arm64"/*.so 2>/dev/null || true
+        fi
+    fi
+}
+
+_port::ensure_phonesky_privapp_permissions() {
+    local image_root="build/portrom/images"
+    local perm_dir
+    for perm_dir in \
+        "${image_root}/my_product/etc/permissions" \
+        "${image_root}/product/etc/permissions" \
+        "${image_root}/system_ext/etc/permissions" \
+        "${image_root}/system/system/etc/permissions"; do
+        [[ -d "${perm_dir}" ]] || continue
+        if grep -R -q 'package="com\.android\.vending"' "${perm_dir}" 2>/dev/null; then
+            return 0
+        fi
+    done
+
+    local target_xml="${image_root}/product/etc/permissions/privapp-permissions-phonesky.xml"
+    mkdir -p "$(dirname "${target_xml}")" || return 1
+    cat <<'EOF' > "${target_xml}"
+<?xml version="1.0" encoding="utf-8"?>
+<permissions>
+    <privapp-permissions package="com.android.vending">
+        <permission name="android.permission.ALLOCATE_AGGRESSIVE"/>
+        <permission name="android.permission.BACKUP"/>
+        <permission name="android.permission.BATTERY_STATS"/>
+        <permission name="android.permission.CHANGE_COMPONENT_ENABLED_STATE"/>
+        <permission name="android.permission.CHANGE_DEVICE_IDLE_TEMP_WHITELIST"/>
+        <permission name="android.permission.CHANGE_OVERLAY_PACKAGES"/>
+        <permission name="android.permission.CLEAR_APP_CACHE"/>
+        <permission name="android.permission.CONNECTIVITY_INTERNAL"/>
+        <permission name="android.permission.DELETE_PACKAGES"/>
+        <permission name="android.permission.DUMP"/>
+        <permission name="android.permission.FORCE_STOP_PACKAGES"/>
+        <permission name="android.permission.GET_ACCOUNTS_PRIVILEGED"/>
+        <permission name="android.permission.GET_APP_OPS_STATS"/>
+        <permission name="android.permission.INSTALL_PACKAGES"/>
+        <permission name="android.permission.INTERACT_ACROSS_USERS"/>
+        <permission name="android.permission.LOADER_USAGE_STATS"/>
+        <permission name="android.permission.MANAGE_ROLLBACKS"/>
+        <permission name="android.permission.MANAGE_USERS"/>
+        <permission name="android.permission.PACKAGE_USAGE_STATS"/>
+        <permission name="android.permission.PACKAGE_VERIFICATION_AGENT"/>
+        <permission name="android.permission.READ_PRIVILEGED_PHONE_STATE"/>
+        <permission name="android.permission.READ_RUNTIME_PROFILES"/>
+        <permission name="android.permission.REAL_GET_TASKS"/>
+        <permission name="android.permission.REBOOT"/>
+        <permission name="android.permission.SEND_DEVICE_CUSTOMIZATION_READY"/>
+        <permission name="android.permission.SEND_SAFETY_CENTER_UPDATE"/>
+        <permission name="android.permission.SET_PREFERRED_APPLICATIONS"/>
+        <permission name="android.permission.START_ACTIVITIES_FROM_BACKGROUND"/>
+        <permission name="android.permission.STATUS_BAR"/>
+        <permission name="android.permission.SUBSTITUTE_NOTIFICATION_APP_NAME"/>
+        <permission name="android.permission.UPDATE_DEVICE_STATS"/>
+        <permission name="android.permission.WRITE_SECURE_SETTINGS"/>
+        <permission name="com.android.permission.USE_INSTALLER_V2"/>
+    </privapp-permissions>
+</permissions>
+EOF
+    chmod 0644 "${target_xml}" 2>/dev/null || true
+}
+
+_port::install_preinstalled_apps() {
+    local image_root="build/portrom/images"
+    [[ -d "${image_root}/product" ]] || return 0
+
+    local root="${work_dir:-.}"
+    local cache_dir="${root}/assets/preinstall"
+    local use_via="${PORT_INSTALL_VIA:-${install_via:-true}}"
+    local use_play="${PORT_INSTALL_PLAY_STORE:-${install_play_store:-true}}"
+    local use_ksu="${PORT_INSTALL_KERNELSU:-${install_kernelsu:-true}}"
+
+    if [[ "${use_via}" == "true" ]]; then
+        local via_apk=""
+        via_apk="$(_port::find_local_preinstall_apk \
+            "devices/common/apps/Via" \
+            "devices/common/via" \
+            "assets/preinstall/Via.apk" 2>/dev/null)" || via_apk=""
+        if [[ -z "${via_apk}" ]]; then
+            via_apk="${cache_dir}/Via.apk"
+            blue "下载 Via 浏览器 APK..." "Downloading Via Browser APK..."
+            if ! _port::download_valid_apk "https://res.viayoo.com/v1/via-release.apk" "${via_apk}" 500000; then
+                _port::download_valid_apk "https://res.viayoo.com/v1/via-release-cn.apk" "${via_apk}" 500000 || {
+                    error "下载 Via 浏览器失败" "Failed to download Via Browser APK"
+                    return 1
+                }
+            fi
+        fi
+        _port::install_apk_to_partition "${via_apk}" "Via" "product/app" || return 1
+        green "已预装 Via 浏览器" "Preinstalled Via Browser"
+    fi
+
+    if [[ "${use_play}" == "true" ]]; then
+        local existing_phonesky phonesky_size=0
+        existing_phonesky="$(find "${image_root}" -type f -name 'Phonesky.apk' -print -quit 2>/dev/null)"
+        if [[ -n "${existing_phonesky}" && -f "${existing_phonesky}" ]]; then
+            phonesky_size="$(wc -c < "${existing_phonesky}" 2>/dev/null || printf '0')"
+        fi
+        if [[ "${phonesky_size}" =~ ^[0-9]+$ ]] && (( phonesky_size > 5000000 )); then
+            blue "检测到完整 Google Play 商店，保留现有 Phonesky.apk" \
+                "Full Google Play Store already present; keeping existing Phonesky.apk"
+        else
+            local phonesky_apk=""
+            phonesky_apk="$(_port::find_local_preinstall_apk \
+                "devices/common/apps/Phonesky" \
+                "devices/common/phonesky" \
+                "assets/preinstall/Phonesky.apk" 2>/dev/null)" || phonesky_apk=""
+            if [[ -z "${phonesky_apk}" ]]; then
+                local mt_branch mt_branches=""
+                case "${port_android_version:-}" in
+                    17) mt_branches="cinnamonbun baklava vic" ;;
+                    16) mt_branches="baklava cinnamonbun vic" ;;
+                    15) mt_branches="vic baklava upsilon" ;;
+                    14) mt_branches="upsilon vic" ;;
+                    *) mt_branches="cinnamonbun baklava vic" ;;
+                esac
+                phonesky_apk="${cache_dir}/Phonesky.apk"
+                local downloaded_phonesky=false
+                for mt_branch in ${mt_branches}; do
+                    blue "下载 Google Play 商店 (${mt_branch})..." \
+                        "Downloading Google Play Store (${mt_branch})..."
+                    if _port::download_valid_apk \
+                        "https://gitlab.com/MindTheGapps/vendor_gapps/-/raw/${mt_branch}/arm64/proprietary/product/priv-app/Phonesky/Phonesky.apk" \
+                        "${phonesky_apk}" 5000000; then
+                        downloaded_phonesky=true
+                        break
+                    fi
+                done
+                if [[ "${downloaded_phonesky}" != true ]]; then
+                    error "下载 Google Play 商店 (Phonesky.apk) 失败" "Failed to download Google Play Store (Phonesky.apk)"
+                    return 1
+                fi
+            fi
+
+            local stub_dir
+            for stub_dir in \
+                "${image_root}/my_product/priv-app/GooglePlayServicesUpdater" \
+                "${image_root}/product/priv-app/GooglePlayServicesUpdater" \
+                "${image_root}/my_stock/priv-app/GooglePlayServicesUpdater" \
+                "${image_root}/system/system/priv-app/GooglePlayServicesUpdater" \
+                "${image_root}/system_ext/priv-app/GooglePlayServicesUpdater"; do
+                [[ -e "${stub_dir}" ]] && rm -rf -- "${stub_dir}"
+            done
+
+            _port::install_apk_to_partition "${phonesky_apk}" "Phonesky" "product/priv-app" || return 1
+            _port::ensure_phonesky_privapp_permissions || return 1
+
+            local cn_gms_xml="${image_root}/my_product/etc/permissions/oplus_google_cn_gms_features.xml"
+            if [[ -f "${cn_gms_xml}" ]] && grep -q 'com\.google\.android\.feature\.services_updater' "${cn_gms_xml}"; then
+                sed -i '/com\.google\.android\.feature\.services_updater/d' "${cn_gms_xml}" || return 1
+            fi
+            green "已预装 Google Play 商店 (Phonesky)" "Preinstalled Google Play Store (Phonesky)"
+        fi
+    fi
+
+    if [[ "${use_ksu}" == "true" ]]; then
+        local ksu_apk=""
+        ksu_apk="$(_port::find_local_preinstall_apk \
+            "devices/common/apps/KernelSU" \
+            "devices/common/kernelsu" \
+            "assets/preinstall/KernelSU.apk" 2>/dev/null)" || ksu_apk=""
+        if [[ -z "${ksu_apk}" ]]; then
+            local ksu_owner="${ksu_repo_owner:-tiann}"
+            local ksu_repo="${ksu_repo_name:-KernelSU}"
+            local api_url="https://api.github.com/repos/${ksu_owner}/${ksu_repo}/releases/latest"
+            local json_tmp ksu_apk_url
+            mkdir -p "${cache_dir}" || return 1
+            json_tmp="$(mktemp "${cache_dir}/.ksu_release.XXXXXX")" || return 1
+            if ! curl -fsSL --connect-timeout 15 --max-time 60 -- "${api_url}" -o "${json_tmp}"; then
+                rm -f -- "${json_tmp}"
+                error "查询 KernelSU 最新发布失败" "Failed to query KernelSU latest release"
+                return 1
+            fi
+            ksu_apk_url="$(grep -io '"browser_download_url": *"[^"]*KernelSU[^"]*\.apk"' "${json_tmp}" | sed -E 's/.*"browser_download_url": *"([^"]*)".*/\1/i' | head -n1)"
+            rm -f -- "${json_tmp}"
+            if [[ -z "${ksu_apk_url}" ]]; then
+                error "未找到 KernelSU APK 下载链接" "KernelSU APK download URL not found"
+                return 1
+            fi
+            ksu_apk="${cache_dir}/KernelSU.apk"
+            blue "下载 KernelSU 管理器 APK..." "Downloading KernelSU Manager APK..."
+            if ! _port::download_valid_apk "${ksu_apk_url}" "${ksu_apk}" 500000; then
+                error "下载 KernelSU 管理器 APK 失败" "Failed to download KernelSU Manager APK"
+                return 1
+            fi
+        fi
+        _port::install_apk_to_partition "${ksu_apk}" "KernelSU" "product/app" || return 1
+        green "已预装 KernelSU 管理器" "Preinstalled KernelSU Manager"
+    fi
+}
 _port::stage_patch_teesim() {
     local src="devices/common/oplus_identity_teesim"
     local out="build/portrom/images"

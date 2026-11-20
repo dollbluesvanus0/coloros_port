@@ -56,3 +56,9 @@ enable_ksu=false
 # KernelSU GitHub repository configuration (optional)
 # ksu_repo_owner=tiann
 # ksu_repo_name=KernelSU
+
+# 预装应用 (Via 浏览器、Google Play 商店、KernelSU 管理器)
+# Preinstalled apps (Via Browser, Google Play Store, KernelSU Manager)
+install_via=true
+install_play_store=true
+install_kernelsu=true
