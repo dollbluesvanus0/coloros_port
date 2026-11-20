@@ -2508,6 +2508,88 @@ EOF
         "Installed OplusCamera unit SDK shared-library permission XML"
 }
 
+_port::restore_stock_oplus_camera() {
+    local base_images="build/baserom/images"
+    local port_images="build/portrom/images"
+    [[ -d "${base_images}" && -d "${port_images}" ]] || return 0
+
+    local base_camera_apk=""
+    local search_part
+    for search_part in my_product my_stock product system_ext system vendor odm; do
+        [[ -d "${base_images}/${search_part}" ]] || continue
+        base_camera_apk="$(find "${base_images}/${search_part}" -type f -name 'OplusCamera.apk' -print -quit 2>/dev/null)"
+        [[ -n "${base_camera_apk}" ]] && break
+    done
+
+    if [[ -z "${base_camera_apk}" && -s "${base_images}/my_stock.img" && ! -d "${base_images}/my_stock" ]]; then
+        if type extract_partition >/dev/null 2>&1; then
+            extract_partition "${base_images}/my_stock.img" "${base_images}" || return 1
+            if [[ -d "${base_images}/my_stock" ]]; then
+                : > "${base_images}/my_stock/.unpacked.done"
+                base_camera_apk="$(find "${base_images}/my_stock" -type f -name 'OplusCamera.apk' -print -quit 2>/dev/null)"
+            fi
+        fi
+    fi
+
+    if [[ -z "${base_camera_apk}" ]]; then
+        base_camera_apk="$(find "${base_images}" -type f -name 'OplusCamera.apk' -print -quit 2>/dev/null)"
+    fi
+
+    [[ -f "${base_camera_apk}" ]] || return 0
+
+    local base_camera_dir
+    base_camera_dir="$(dirname "${base_camera_apk}")"
+    local rel_camera_dir="${base_camera_dir#${base_images}/}"
+    local target_camera_dir="${port_images}/${rel_camera_dir}"
+    local target_part="${rel_camera_dir%%/*}"
+    if [[ ! -d "${port_images}/${target_part}" ]]; then
+        rel_camera_dir="my_product/app/OplusCamera"
+        target_camera_dir="${port_images}/${rel_camera_dir}"
+    fi
+
+    blue "恢复原厂相机 OplusCamera (${rel_camera_dir})" \
+        "Restoring stock OplusCamera (${rel_camera_dir})"
+
+    # Purge any donor OplusCamera directories across all partitions so donor
+    # APKs or overlays cannot shadow the stock OplusCamera.
+    find "${port_images}" -type d -name 'OplusCamera' -exec rm -rf -- {} + 2>/dev/null || true
+
+    mkdir -p "${target_camera_dir}" || return 1
+    cp -rf -- "${base_camera_dir}"/. "${target_camera_dir}/" || return 1
+
+    if [[ -d "${base_images}/my_product/etc/camera" ]]; then
+        mkdir -p "${port_images}/my_product/etc/camera" || return 1
+        cp -rf -- "${base_images}/my_product/etc/camera"/. "${port_images}/my_product/etc/camera/" || return 1
+    fi
+
+    # Replace donor camera framework JARs/overlays with the stock ones.
+    if [[ -d "${port_images}/my_product/product_overlay/framework" ]]; then
+        rm -rf -- "${port_images}/my_product/product_overlay/framework"/com.oplus.camera.*.jar
+        find "${port_images}/my_product/product_overlay/framework" -type f -name 'com.oplus.camera.*' -delete 2>/dev/null || true
+    fi
+    if [[ -d "${base_images}/my_product/product_overlay" ]]; then
+        mkdir -p "${port_images}/my_product/product_overlay" || return 1
+        cp -rf -- "${base_images}/my_product/product_overlay"/. "${port_images}/my_product/product_overlay/" || return 1
+    fi
+    if [[ -d "${port_images}/product/framework" ]]; then
+        find "${port_images}/product/framework" -maxdepth 1 -type f -name 'com.oplus.camera.*' -delete 2>/dev/null || true
+    fi
+    if [[ -d "${base_images}/product/framework" ]]; then
+        mkdir -p "${port_images}/product/framework" || return 1
+        find "${base_images}/product/framework" -maxdepth 1 -type f -name 'com.oplus.camera.*' \
+            -exec cp -f -- {} "${port_images}/product/framework/" \; || return 1
+    fi
+
+    if [[ -d "${base_images}/my_product/etc/permissions" ]]; then
+        mkdir -p "${port_images}/my_product/etc/permissions" || return 1
+        find "${base_images}/my_product/etc/permissions" -maxdepth 1 -type f \
+            \( -name '*camera*.xml' -o -name '*unit.sdk*.xml' \) \
+            -exec cp -f -- {} "${port_images}/my_product/etc/permissions/" \; || return 1
+    fi
+
+    ensure_oplus_camera_unit_sdk_permission || return 1
+}
+
 # Android 17 ports that retain a Qualcomm/Oplus HIDL IMS declaration need the
 # VNDK-30-compatible IMS APK.  Select it only for HIDL-only manifests; an AIDL
 # declaration or a missing release asset leaves the donor stack untouched.

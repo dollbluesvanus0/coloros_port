@@ -365,6 +365,7 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
     def test_rom_optimization_and_camera_unit_sdk_permission_helpers(self):
         port_text = PORT_SH.read_text(encoding='utf-8')
         self.assertIn('ensure_oplus_camera_unit_sdk_permission', port_text)
+        self.assertIn('_port::restore_stock_oplus_camera', port_text)
         self.assertIn('_port::stage_rom_optimizations', port_text)
         self.assertIn('debug.sf.oplus_display_trace.enable', port_text)
         self.assertIn('ro.audio.voiplog.on', port_text)
@@ -428,6 +429,49 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             self.assertNotIn('ra_kb=512', pb_text)
             self.assertIn('ra_kb=128', pb_text)
             self.assertEqual(pb_text.count('# coloros_port_io_tuning'), 1)
+
+    def test_restore_stock_oplus_camera_purges_donor_and_restores_stock(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / 'build' / 'baserom' / 'images'
+            port = root / 'build' / 'portrom' / 'images'
+
+            # Stock OplusCamera in product/app/OplusCamera plus camera cfg & unit SDK jar
+            stock_apk = base / 'product' / 'app' / 'OplusCamera' / 'OplusCamera.apk'
+            stock_apk.parent.mkdir(parents=True, exist_ok=True)
+            stock_apk.write_bytes(b'stock-camera')
+            (base / 'my_product' / 'etc' / 'camera').mkdir(parents=True, exist_ok=True)
+            (base / 'my_product' / 'etc' / 'camera' / 'cfg.xml').write_text('stock-cfg', encoding='utf-8')
+            stock_jar = base / 'my_product' / 'product_overlay' / 'framework' / 'com.oplus.camera.unit.sdk.jar'
+            stock_jar.parent.mkdir(parents=True, exist_ok=True)
+            stock_jar.write_bytes(b'stock-sdk')
+
+            # Donor OplusCamera shadows across multiple partitions + stale donor jar
+            for rel in ('my_product/app/OplusCamera', 'my_stock/priv-app/OplusCamera', 'product/priv-app/OplusCamera'):
+                donor_apk = port / rel / 'OplusCamera.apk'
+                donor_apk.parent.mkdir(parents=True, exist_ok=True)
+                donor_apk.write_bytes(b'donor-camera')
+            stale_jar = port / 'my_product' / 'product_overlay' / 'framework' / 'com.oplus.camera.donor.jar'
+            stale_jar.parent.mkdir(parents=True, exist_ok=True)
+            stale_jar.write_bytes(b'donor-jar')
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                _port::restore_stock_oplus_camera || exit 2
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+            self.assertEqual((port / 'product' / 'app' / 'OplusCamera' / 'OplusCamera.apk').read_bytes(), b'stock-camera')
+            self.assertFalse((port / 'my_product' / 'app' / 'OplusCamera').exists())
+            self.assertFalse((port / 'my_stock' / 'priv-app' / 'OplusCamera').exists())
+            self.assertFalse((port / 'product' / 'priv-app' / 'OplusCamera').exists())
+            self.assertFalse(stale_jar.exists())
+            self.assertEqual((port / 'my_product' / 'product_overlay' / 'framework' / 'com.oplus.camera.unit.sdk.jar').read_bytes(), b'stock-sdk')
+            self.assertEqual((port / 'my_product' / 'etc' / 'camera' / 'cfg.xml').read_text(encoding='utf-8'), 'stock-cfg')
+            self.assertTrue((port / 'my_product' / 'etc' / 'permissions' / 'com.oplus.camera.unit.sdk.xml').exists())
 
 
 if __name__ == '__main__':

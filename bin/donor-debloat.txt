@@ -6,6 +6,9 @@ my_stock/app/OPBreathMode
 my_stock/app/OppoTranslation
 my_product/del-app
 my_product/app/OplusCamera
+my_product/priv-app/OplusCamera
+my_stock/app/OplusCamera
+my_stock/priv-app/OplusCamera
 my_product/app/AudioEffectCenter
 my_product/app/BaiduInput
 my_product/product_overlay

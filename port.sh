@@ -2011,27 +2011,13 @@ cp -rf  build/baserom/images/my_product/vendor/etc/* build/portrom/images/my_pro
             rm -rf $target_scanner_app/*
             cp -rf $base_scanner_app $target_scanner_app
         fi
+    else
+        _port::restore_stock_oplus_camera || exit 1
     fi
 else
     add_prop_v2 "ro.vendor.oplus.camera.isSupportExplorer" "1"
-    base_oplus_camera_dir=$(find build/baserom/images/my_product -type d -name "OplusCamera")
-    port_oplus_camera_dir=$(find build/portrom/images/my_product -type d -name "OplusCamera")
-
-    if [[ -d "${base_oplus_camera_dir}" ]];then
-        # Debloat removes the donor camera; restore the device's base camera.
-        port_oplus_camera_dir="build/portrom/images/my_product/app/OplusCamera"
-        mkdir -p "${port_oplus_camera_dir}" build/portrom/images/my_product/product_overlay/framework
-        rm -rf "$port_oplus_camera_dir"/*
-        cp -rf "$base_oplus_camera_dir"/* "$port_oplus_camera_dir"/
-        if [[ -d build/baserom/images/my_product/product_overlay/framework ]]; then
-            cp -rf build/baserom/images/my_product/product_overlay/framework/* build/portrom/images/my_product/product_overlay/framework/
-        fi
-        if [[ -d build/baserom/images/my_product/product_overlay/etc/permissions ]]; then
-            mkdir -p build/portrom/images/my_product/product_overlay/etc/permissions
-            cp -rf build/baserom/images/my_product/product_overlay/etc/permissions/* build/portrom/images/my_product/product_overlay/etc/permissions/
-        fi
-    fi
- fi
+    _port::restore_stock_oplus_camera || exit 1
+fi
 ensure_oplus_camera_unit_sdk_permission || exit 1
 
 if [[ ${base_device_family} == "OPSM8250" ]]; then
@@ -2245,7 +2231,7 @@ if ensure_resource_available "devices/common/realme_gesture.zip" && [[ "$port_ve
 fi
 
 
-if [[ "${base_product_device}" == "OnePlus9Pro" ]] ||[[ "${base_product_device}" == "OnePlus9" ]] ||  [[ "${base_product_device}" == "OP4E5D" ]] || [[ "${base_product_device}" == "OP4E3F" ]]; then
+if [[ "${PORT_USE_STOCK_CAMERA:-false}" != "true" ]] && { [[ "${base_product_device}" == "OnePlus9Pro" ]] || [[ "${base_product_device}" == "OnePlus9" ]] || [[ "${base_product_device}" == "OP4E5D" ]] || [[ "${base_product_device}" == "OP4E3F" ]]; }; then
     if [[ "$portIsColorOS" == "true" ]];then
         if [[ $port_android_version == "17" ]];then
             if ensure_resource_available "devices/common/camera6.0-fix_cos.zip"; then
