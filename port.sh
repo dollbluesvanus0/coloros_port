@@ -3014,9 +3014,9 @@ else
     else
         mv -f build/baserom/images/*.img out/${os_type}_${rom_version}/firmware-update
         for fwimg in $(ls out/${os_type}_${rom_version}/firmware-update |cut -d "." -f 1 |grep -vE "super|cust|preloader");do
-            if [[ $fwimg == *"xbl"* ]] || [[ $fwimg == *"dtbo"* ]] || [[ $fwimg == *"reserve"* ]] || [[ $fwimg == *"boot"* ]];then
+            if [[ $fwimg == *"xbl"* ]] || [[ $fwimg == *"dtbo"* ]] || [[ $fwimg == *"reserve"* ]] || [[ $fwimg == "boot" ]] || [[ $fwimg == boot_* ]] || [[ $fwimg == *_dlkm ]];then
                 rm -rf out/${os_type}_${rom_version}/firmware-update/*reserve*
-                # Warning: If wrong xbl img has been flashed, it will cause phone hard brick, so we just skip it with fastboot mode.
+                # Skip xbl/dtbo/boot (handled explicitly) and dynamic *_dlkm (inside super.img).
                 continue
             elif [[ $fwimg == "mdm_oem_stanvbk" ]] || [[ $fwimg == "spunvm" ]] ;then
                 sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe flash "${fwimg}" firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
