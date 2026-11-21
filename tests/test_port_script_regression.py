@@ -526,6 +526,45 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             self.assertTrue((port / 'product' / 'app' / 'KernelSU' / 'KernelSU.apk').is_file())
             self.assertEqual((port / 'product' / 'app' / 'KernelSU' / 'lib' / 'arm64' / 'libksud.so').read_bytes(), b'elf-so')
 
+    def test_download_valid_apk_passes_output_flag_before_double_dash(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sample_zip = root / 'sample.apk'
+            with zipfile.ZipFile(sample_zip, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest/>')
+                zf.writestr('pad.bin', b'x' * 70000)
+
+            dest = root / 'out' / 'Via.apk'
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                curl() {{
+                    local out="" after_dash=false expect_out="" arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            [[ "$arg" != "-o" ]] || return 64
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        fi
+                    done
+                    [[ -n "$out" ]] || return 65
+                    cp -f "{sample_zip.as_posix()}" "$out"
+                }}
+                _port::download_valid_apk "https://example.invalid/via.apk" "{dest.as_posix()}" 1024 || exit 2
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue(dest.is_file())
+
 
 if __name__ == '__main__':
     unittest.main()

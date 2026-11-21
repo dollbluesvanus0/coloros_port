@@ -3878,7 +3878,7 @@ _port::download_valid_apk() {
     mkdir -p "$(dirname "${dest}")" || return 1
     rm -f -- "${tmp_file}"
 
-    if ! curl -fsSL --connect-timeout 15 --max-time 240 --retry 2 -- "${url}" -o "${tmp_file}"; then
+    if ! curl -fsSL --connect-timeout 15 --max-time 240 --retry 2 -o "${tmp_file}" -- "${url}"; then
         rm -f -- "${tmp_file}"
         return 1
     fi
@@ -4105,7 +4105,7 @@ _port::install_preinstalled_apps() {
             local json_tmp ksu_apk_url
             mkdir -p "${cache_dir}" || return 1
             json_tmp="$(mktemp "${cache_dir}/.ksu_release.XXXXXX")" || return 1
-            if ! curl -fsSL --connect-timeout 15 --max-time 60 -- "${api_url}" -o "${json_tmp}"; then
+            if ! curl -fsSL --connect-timeout 15 --max-time 60 -o "${json_tmp}" -- "${api_url}"; then
                 rm -f -- "${json_tmp}"
                 error "查询 KernelSU 最新发布失败" "Failed to query KernelSU latest release"
                 return 1
