@@ -3022,13 +3022,21 @@ else
                 sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe flash "${fwimg}" firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
                 sed -i "/\# firmware/a fastboot flash "${fwimg}" firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
             elif [ "$(echo ${fwimg} |grep vbmeta)" != "" ];then
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe --disable-verity --disable-verification flash "${fwimg}"_b firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe --disable-verity --disable-verification flash "${fwimg}"_a firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
+                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* --disable-verity --disable-verification flash "${fwimg}"_b firmware-update\/"${fwimg}".img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* --disable-verity --disable-verification flash "${fwimg}"_a firmware-update\/"${fwimg}".img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
                 sed -i "/\# firmware/a fastboot --disable-verity --disable-verification flash "${fwimg}"_b firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
                 sed -i "/\# firmware/a fastboot --disable-verity --disable-verification flash "${fwimg}"_a firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
             else
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe flash "${fwimg}"_b firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe flash "${fwimg}"_a firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
+                case "${fwimg}" in
+                    abl|aop|aop_config|cpucp|devcfg|engineering_cdt|featenabler|hyp|imagefv|keymaster|oplus_sec|oplusstanvbk|qupfw|shrm|splash|tz|uefi|uefisecapp)
+                        sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* flash "${fwimg}"_b firmware-update\/"${fwimg}".img || echo [WARN] Skipped "${fwimg}"_b" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* flash "${fwimg}"_a firmware-update\/"${fwimg}".img || echo [WARN] Skipped "${fwimg}"_a" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        ;;
+                    *)
+                        sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* flash "${fwimg}"_b firmware-update\/"${fwimg}".img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* flash "${fwimg}"_a firmware-update\/"${fwimg}".img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        ;;
+                esac
                 sed -i "/\# firmware/a fastboot flash "${fwimg}"_b firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
                 sed -i "/\# firmware/a fastboot flash "${fwimg}"_a firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
             fi
