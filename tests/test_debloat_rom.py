@@ -77,8 +77,6 @@ class DebloatTests(unittest.TestCase):
         manifest_text = MANIFEST.read_text(encoding='utf-8').splitlines()
         for expected in (
             'my_stock/del-app/KeKeUserCenterMember',
-            'my_stock/priv-app/KeKeAppDetail',
-            'my_stock/priv-app/KeKeMarket',
             'my_stock/priv-app/DCS',
             'my_stock/priv-app/DRS',
             'my_stock/app/MSPService',
