@@ -16,16 +16,20 @@ if exist "super.zst" (
     ) else (
         echo. Extracting the super image, wait patiently
     )
-    bin\windows\zstd.exe --rm -d super.zst -o super.img
-    if not "%errorlevel%" == "0" (
+    if exist "super.img.tmp" del /f /q "super.img.tmp" >nul 2>nul
+    bin\windows\zstd.exe -d super.zst -o super.img.tmp
+    if not "!errorlevel!" == "0" (
+        if exist "super.img.tmp" del /f /q "super.img.tmp" >nul 2>nul
         if "%LANG%"=="Chinese" (
             echo. 转换失败,按任意键退出
         ) else (
             echo. Conversion failed. Press any key to exit
         )
         pause >nul 2>nul
-        exit
+        exit /B 1
     )
+    move /y "super.img.tmp" "super.img" >nul || ( pause & exit /B 1 )
+    del /f /q "super.zst" >nul 2>nul
 )
 
 if "%LANG%"=="Chinese" (
@@ -45,11 +49,15 @@ if "%LANG%"=="Chinese" (
     set "input=1"
     set /p input=Please select - 1 is selected by default, and enter to execute:
 )
+if not "!input!"=="1" if not "!input!"=="2" (
+    echo Invalid selection: !input!
+    pause
+    exit /B 1
+)
 
 if "%LANG%"=="Chinese" (
     echo.
     echo. 机型验证中...请确保您的设备代号为device_code，并进入bootloader或fastbootd模式。
-
     echo.
 ) else (
     echo.
@@ -57,9 +65,38 @@ if "%LANG%"=="Chinese" (
     echo.
 )
 
+set "userspace="
+for /f "tokens=1,* delims=:" %%a in ('bin\windows\fastboot.exe %* getvar is-userspace 2^>^&1 ^| findstr /r /c:"is-userspace:"') do (
+    for /f "tokens=1" %%u in ("%%b") do set "userspace=%%u"
+)
+if /i "!userspace!"=="yes" (
+    if "%LANG%"=="Chinese" (
+        echo. 检测到fastbootd模式，正在重启到bootloader...
+    ) else (
+        echo. Detected fastbootd mode, rebooting into bootloader...
+    )
+    bin\windows\fastboot.exe %* reboot bootloader || ( pause & exit /B 1 )
+    set /a _fb_tries=0
+    :wait_bootloader_loop
+    ping 127.0.0.1 -n 3 >nul 2>nul
+    set "userspace="
+    for /f "tokens=1,* delims=:" %%a in ('bin\windows\fastboot.exe %* getvar is-userspace 2^>^&1 ^| findstr /r /c:"is-userspace:"') do (
+        for /f "tokens=1" %%u in ("%%b") do set "userspace=%%u"
+    )
+    if /i "!userspace!"=="no" goto :bootloader_ready
+    set /a _fb_tries+=1
+    if !_fb_tries! lss 15 goto :wait_bootloader_loop
+    echo Timed out waiting for bootloader.
+    pause
+    exit /B 1
+)
+:bootloader_ready
+
 :: 获取设备代码
 set "product="
-for /f "tokens=2 delims=: " %%i in ('bin\windows\fastboot.exe %* getvar product 2^>^&1 ^| findstr /r /c:"^product: "') do set "product=%%i"
+for /f "tokens=1,* delims=:" %%a in ('bin\windows\fastboot.exe %* getvar product 2^>^&1 ^| findstr /r /c:"product:"') do (
+    for /f "tokens=1" %%p in ("%%b") do set "product=%%p"
+)
 
 :: 预期设备代码
 set "expected_device=device_code"
@@ -67,14 +104,10 @@ set "expected_device=device_code"
 :: 设置语言相关的消息
 if "%LANG%"=="Chinese" (
     set "msg_mismatch= 设备device_code不匹配。请检查连接或设备代号"
-    set "msg_continue=你想继续吗？(y/n): "
     set "msg_abort= 操作已被用户中止。"
-    set "msg_continue_process=继续操作..."
 ) else (
     set "msg_mismatch=Mismatching image and device."
-    set "msg_continue=Do you want to continue anyway? (y/n): "
     set "msg_abort=Operation aborted by user."
-    set "msg_continue_process=Continuing with the process..."
 )
 
 :: 检查是否匹配
@@ -85,17 +118,10 @@ if not defined product (
     exit /B 1
 )
 if /i "!product!" neq "%expected_device%" (
-    echo %msg_mismatch%
+    echo %msg_mismatch% ^(got "!product!", expected "%expected_device%"^)
     echo %msg_abort%
     pause
     exit /B 1
-)
-
-set "userspace="
-for /f "tokens=2 delims=: " %%i in ('bin\windows\fastboot.exe %* getvar is-userspace 2^>^&1 ^| findstr /r /c:"^is-userspace:"') do set "userspace=%%i"
-if /i "!userspace!"=="yes" (
-    bin\windows\fastboot.exe %* reboot bootloader || ( pause & exit /B 1 )
-    ping 127.0.0.1 -n 6 >nul 2>nul
 )
 
 set "kernel=2"
@@ -112,7 +138,7 @@ if exist "%~dp0boot_ksu.img" (
         echo.
         echo. 1. Flashing KernelSU boot.img
         echo.
-        echo. 2. Flahsing Official boot.img
+        echo. 2. Flashing Official boot.img
         echo.
         set "kernel=1"
         set /p kernel=Please select - 1 is selected by default, and enter to execute:
@@ -133,12 +159,12 @@ if not exist "%~dp0super.img" (
     exit /B 1
 )
 if not exist "!flash_boot!" (
-    echo Required boot image is missing.
+    echo Required boot image is missing: !flash_boot!
     pause
     exit /B 1
 )
 if not exist "!flash_dtbo!" (
-    echo Required dtbo image is missing.
+    echo Required dtbo image is missing: !flash_dtbo!
     pause
     exit /B 1
 )
@@ -148,55 +174,42 @@ if "%kernel%"=="1" (
     ) else (
         echo. Flashing custom boot.img
     )
-
-    if exist "%~dp0boot_ksu.img" (
-        bin\windows\fastboot.exe %* flash boot_a "%~dp0boot_ksu.img" || ( pause & exit /B 1 )
-        bin\windows\fastboot.exe %* flash boot_b "%~dp0boot_ksu.img" || ( pause & exit /B 1 )
-        bin\windows\fastboot.exe %* flash dtbo_a "!flash_dtbo!" || ( pause & exit /B 1 )
-        bin\windows\fastboot.exe %* flash dtbo_b "!flash_dtbo!" || ( pause & exit /B 1 )
-    ) else (
-		if "%LANG%"=="Chinese" (
-		echo. boot_ksu.img 不存在，刷入官方boot_official.img
-			) else (
-		echo. boot_ksu.img not exists, Flashing boot_official.img
-			)
-
-        bin\windows\fastboot.exe %* flash boot_a "%~dp0boot_official.img" || ( pause & exit /B 1 )
-        bin\windows\fastboot.exe %* flash boot_b "%~dp0boot_official.img" || ( pause & exit /B 1 )
-        bin\windows\fastboot.exe %* flash dtbo_a "%~dp0firmware-update\dtbo.img" || ( pause & exit /B 1 )
-        bin\windows\fastboot.exe %* flash dtbo_b "%~dp0firmware-update\dtbo.img" || ( pause & exit /B 1 )
-    )
 ) else (
-    bin\windows\fastboot.exe %* flash boot_a "%~dp0boot_official.img" || ( pause & exit /B 1 )
-    bin\windows\fastboot.exe %* flash boot_b "%~dp0boot_official.img" || ( pause & exit /B 1 )
-    bin\windows\fastboot.exe %* flash dtbo_a "%~dp0firmware-update\dtbo.img" || ( pause & exit /B 1 )
-    bin\windows\fastboot.exe %* flash dtbo_b "%~dp0firmware-update\dtbo.img" || ( pause & exit /B 1 )
+    if "%LANG%"=="Chinese" (
+        echo. 刷入官方boot_official.img
+    ) else (
+        echo. Flashing official boot.img
+    )
 )
+bin\windows\fastboot.exe %* flash boot_a "!flash_boot!" || ( pause & exit /B 1 )
+bin\windows\fastboot.exe %* flash boot_b "!flash_boot!" || ( pause & exit /B 1 )
+bin\windows\fastboot.exe %* flash dtbo_a "!flash_dtbo!" || ( pause & exit /B 1 )
+bin\windows\fastboot.exe %* flash dtbo_b "!flash_dtbo!" || ( pause & exit /B 1 )
 
 REM firmware
 
 bin\windows\fastboot.exe %* erase super || ( pause & exit /B 1 )
 bin\windows\fastboot.exe %* flash super "%~dp0super.img" || ( pause & exit /B 1 )
-if "%input%" == "2" (
-	if "%LANG%"=="Chinese" (
-	    echo. 正在双清系统,耐心等待
+if "!input!" == "2" (
+    if "%LANG%"=="Chinese" (
+        echo. 正在双清系统,耐心等待
     ) else (
         echo. Wiping data, please wait patiently
     )
-	bin\windows\fastboot.exe erase userdata || exit /B 1
-	bin\windows\fastboot.exe erase metadata || exit /B 1
+    bin\windows\fastboot.exe %* erase userdata || ( pause & exit /B 1 )
+    bin\windows\fastboot.exe %* erase metadata || ( pause & exit /B 1 )
 )
 REM SET_ACTION_SLOT_A_BEGIN
 if "%LANG%"=="Chinese" (
-	echo. 设置活动分区为 'a'。可能需要一些时间。请勿手动重新启动或拔掉数据线，否则可能导致设备变砖。
+    echo. 设置活动分区为 'a'。可能需要一些时间。请勿手动重新启动或拔掉数据线，否则可能导致设备变砖。
 ) else (
     echo. Starting the process to set the active slot to 'a.' This may take some time. Please refrain from manually restarting or unplugging the data cable, as doing so could result in the device becoming unresponsive.
 )
-bin\windows\fastboot.exe set_active a || exit /B 1
+bin\windows\fastboot.exe %* set_active a || ( pause & exit /B 1 )
 
 REM SET_ACTION_SLOT_A_END
 
-bin\windows\fastboot.exe reboot || exit /B 1
+bin\windows\fastboot.exe %* reboot || ( pause & exit /B 1 )
 
 if "%LANG%"=="Chinese" (
     echo. 刷机完成,若手机长时间未重启请手动重启,按任意键退出
@@ -204,4 +217,4 @@ if "%LANG%"=="Chinese" (
     echo. Flash completed. If the phone does not restart for an extended period, please manually restart. Press any key to exit.
 )
 pause
-exit
+exit /B 0

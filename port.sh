@@ -3002,43 +3002,54 @@ else
                 part=${fwimg}                
             fi
 
-            sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe flash "${part}" firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
-            sed -i "/# firmware/a fastboot flash "${part}" firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+            sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${part} firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+            sed -i "/# firmware/a fb flash ${part} firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
         done
         sed -i "/_b/d" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/_a//g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
+        sed -i -E 's/_a([[:space:]"'\'']|$)/\1/g' out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
+        sed -i '/# SET_ACTION_SLOT_A_BEGIN/,/# SET_ACTION_SLOT_A_END/d' out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
         sed -i "/_b/d" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i "s/_a//g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+        sed -i -E 's/_a([[:space:]"'\'']|$)/\1/g' out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+        sed -i "/_b/d" out/${os_type}_${rom_version}/windows_flash_script.bat
+        sed -i -E 's/_a([[:space:]"'\'']|$)/\1/g' out/${os_type}_${rom_version}/windows_flash_script.bat
         sed -i '/^REM SET_ACTION_SLOT_A_BEGIN/,/^REM SET_ACTION_SLOT_A_END/d' out/${os_type}_${rom_version}/windows_flash_script.bat
         sed -i '/# SET_ACTION_SLOT_A_BEGIN/,/# SET_ACTION_SLOT_A_END/d' out/${os_type}_${rom_version}/mac_linux_flash_script.sh
     else
+        if [[ -f build/baserom/images/init_boot-kernelsu.img ]];then
+            mv -f build/baserom/images/init_boot-kernelsu.img build/baserom/images/init_boot.img
+        fi
         mv -f build/baserom/images/*.img out/${os_type}_${rom_version}/firmware-update
+        if [[ -f build/portrom/images/abl.img && ! -f out/${os_type}_${rom_version}/firmware-update/abl.img ]];then
+            cp -f build/portrom/images/abl.img out/${os_type}_${rom_version}/firmware-update/abl.img
+        fi
         for fwimg in $(ls out/${os_type}_${rom_version}/firmware-update |cut -d "." -f 1 |grep -vE "super|cust|preloader");do
-            if [[ $fwimg == *"xbl"* ]] || [[ $fwimg == *"dtbo"* ]] || [[ $fwimg == *"reserve"* ]] || [[ $fwimg == "boot" ]] || [[ $fwimg == boot_* ]] || [[ $fwimg == *_dlkm ]];then
+            if [[ $fwimg == *"xbl"* ]] || [[ $fwimg == *"dtbo"* ]] || [[ $fwimg == *"reserve"* ]] || [[ $fwimg == "boot" ]] || [[ $fwimg == boot_* ]] || [[ $fwimg == init_boot-* ]] || [[ $fwimg == *_dlkm ]];then
                 rm -rf out/${os_type}_${rom_version}/firmware-update/*reserve*
                 # Skip xbl/dtbo/boot (handled explicitly) and dynamic *_dlkm (inside super.img).
                 continue
             elif [[ $fwimg == "mdm_oem_stanvbk" ]] || [[ $fwimg == "spunvm" ]] ;then
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe flash "${fwimg}" firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
-                sed -i "/\# firmware/a fastboot flash "${fwimg}" firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${fwimg} firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                sed -i "/# firmware/a fb flash ${fwimg} firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
             elif [ "$(echo ${fwimg} |grep vbmeta)" != "" ];then
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* --disable-verity --disable-verification flash "${fwimg}"_b firmware-update\/"${fwimg}".img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* --disable-verity --disable-verification flash "${fwimg}"_a firmware-update\/"${fwimg}".img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
-                sed -i "/\# firmware/a fastboot --disable-verity --disable-verification flash "${fwimg}"_b firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-                sed -i "/\# firmware/a fastboot --disable-verity --disable-verification flash "${fwimg}"_a firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* --disable-verity --disable-verification flash ${fwimg}_b firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* --disable-verity --disable-verification flash ${fwimg}_a firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                sed -i "/# firmware/a fb --disable-verity --disable-verification flash ${fwimg}_b firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                sed -i "/# firmware/a fb --disable-verity --disable-verification flash ${fwimg}_a firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
             else
                 case "${fwimg}" in
                     abl|aop|aop_config|cpucp|devcfg|engineering_cdt|featenabler|hyp|imagefv|keymaster|oplus_sec|oplusstanvbk|qupfw|shrm|splash|tz|uefi|uefisecapp)
-                        sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* flash "${fwimg}"_b firmware-update\/"${fwimg}".img || echo [WARN] Skipped "${fwimg}"_b" out/${os_type}_${rom_version}/windows_flash_script.bat
-                        sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* flash "${fwimg}"_a firmware-update\/"${fwimg}".img || echo [WARN] Skipped "${fwimg}"_a" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${fwimg}_b firmware-update/${fwimg}.img || echo [WARN] Skipped ${fwimg}_b" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${fwimg}_a firmware-update/${fwimg}.img || echo [WARN] Skipped ${fwimg}_a" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/# firmware/a fb flash ${fwimg}_b firmware-update/${fwimg}.img || echo \"[WARN] Skipped ${fwimg}_b\"" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                        sed -i "/# firmware/a fb flash ${fwimg}_a firmware-update/${fwimg}.img || echo \"[WARN] Skipped ${fwimg}_a\"" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
                         ;;
                     *)
-                        sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* flash "${fwimg}"_b firmware-update\/"${fwimg}".img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
-                        sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe %* flash "${fwimg}"_a firmware-update\/"${fwimg}".img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${fwimg}_b firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${fwimg}_a firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/# firmware/a fb flash ${fwimg}_b firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                        sed -i "/# firmware/a fb flash ${fwimg}_a firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
                         ;;
                 esac
-                sed -i "/\# firmware/a fastboot flash "${fwimg}"_b firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-                sed -i "/\# firmware/a fastboot flash "${fwimg}"_a firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
             fi
         done
     fi
@@ -3054,8 +3065,6 @@ else
     sed -i "s/andVersion/${port_android_version}/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
     sed -i "s/PROJECT_CODE/${base_device_code}/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
 
-    unix2dos out/${os_type}_${rom_version}/windows_flash_script.bat
-
     #disable vbmeta
     _out_vbmeta_imgs=()
     while IFS= read -r -d '' img; do
@@ -3063,8 +3072,8 @@ else
         _out_vbmeta_imgs+=("${img}")
     done < <(find "out/${os_type}_${rom_version}/" -type f -name "vbmeta*.img" -print0)
     if [[ ${#_out_vbmeta_imgs[@]} -gt 0 ]]; then
-        run_rom_ops patch-vbmeta "${_out_vbmeta_imgs[@]}"
-        _out_vbmeta_rc=$?
+        _out_vbmeta_rc=0
+        run_rom_ops patch-vbmeta "${_out_vbmeta_imgs[@]}" || _out_vbmeta_rc=$?
         if [[ ${_out_vbmeta_rc} -eq 127 ]]; then
             for img in "${_out_vbmeta_imgs[@]}"; do
                 python3 bin/patch-vbmeta.py "${img}"
@@ -3074,53 +3083,53 @@ else
         fi
     fi
 
-    ksu_bootimg_file=$(find devices/$base_product_device/ -type f -name "*boot_ksu.img")
-    nonksu_bootimg_file=$(find devices/$base_product_device/ -type f -name "*boot_noksu.img")
-    custom_bootimg_file=$(find devices/$base_product_device/ -type f -name "*boot_custom.img")
+    ksu_bootimg_file=$(find "devices/$base_product_device/" -type f -name "*boot_ksu.img" -print -quit 2>/dev/null || true)
+    nonksu_bootimg_file=$(find "devices/$base_product_device/" -type f -name "*boot_noksu.img" -print -quit 2>/dev/null || true)
+    custom_bootimg_file=$(find "devices/$base_product_device/" -type f -name "*boot_custom.img" -print -quit 2>/dev/null || true)
 
-    if [[ -f $nonksu_bootimg_file ]];then
+    if [[ -n "$nonksu_bootimg_file" && -f "$nonksu_bootimg_file" ]];then
         nonksubootimg=$(basename "$nonksu_bootimg_file")
-        mv -f "$nonksu_bootimg_file" out/${os_type}_${rom_version}/
-        [[ -f "devices/$base_product_device/dtbo_noksu.img" ]] && \
-            mv -f "devices/$base_product_device/dtbo_noksu.img" "out/${os_type}_${rom_version}/firmware-update/dtbo_noksu.img"
+        mv -f "$nonksu_bootimg_file" "out/${os_type}_${rom_version}/"
         sed -i "s/boot_official.img/$nonksubootimg/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
         sed -i "s/boot_official.img/$nonksubootimg/g" out/${os_type}_${rom_version}/windows_flash_script.bat
         sed -i "s/boot_official.img/$nonksubootimg/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i "s/dtbo.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/dtbo.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/windows_flash_script.bat
-        sed -i "s/dtbo.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i '/^REM OFFICAL_BOOT_START/,/^REM OFFICAL_BOOT_END/d' out/${os_type}_${rom_version}/windows_flash_script.bat
+        if [[ -f "devices/$base_product_device/dtbo_noksu.img" ]]; then
+            mv -f "devices/$base_product_device/dtbo_noksu.img" "out/${os_type}_${rom_version}/firmware-update/dtbo_noksu.img"
+            sed -i "s/dtbo\.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
+            sed -i "s/dtbo\.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/windows_flash_script.bat
+            sed -i "s/dtbo\.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+        fi
     else
-        bootimg=$(find build/baserom/ out/${os_type}_${rom_version} -name "boot.img")
-        mv -f $bootimg out/${os_type}_${rom_version}/boot_official.img
+        bootimg=$(find build/baserom/ "out/${os_type}_${rom_version}" -name "boot.img" -print -quit 2>/dev/null || true)
+        if [[ -n "$bootimg" && -f "$bootimg" ]]; then
+            mv -f "$bootimg" "out/${os_type}_${rom_version}/boot_official.img"
+        fi
     fi
 
-    if [[ -f "$ksu_bootimg_file" ]];then
+    if [[ -n "$ksu_bootimg_file" && -f "$ksu_bootimg_file" ]];then
         ksubootimg=$(basename "$ksu_bootimg_file")
-        mv -f "$ksu_bootimg_file" out/${os_type}_${rom_version}/
-        [[ -f "devices/$base_product_device/dtbo_ksu.img" ]] && \
+        mv -f "$ksu_bootimg_file" "out/${os_type}_${rom_version}/"
+        if [[ -f "devices/$base_product_device/dtbo_ksu.img" ]]; then
             mv -f "devices/$base_product_device/dtbo_ksu.img" "out/${os_type}_${rom_version}/firmware-update/dtbo_ksu.img"
-        sed -i "s/boot_tv.img/$ksubootimg/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/boot_tv.img/$ksubootimg/g" out/${os_type}_${rom_version}/windows_flash_script.bat
-        sed -i "s/boot_tv.img/$ksubootimg/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i "s/dtbo_tv.img/dtbo_ksu.img/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/dtbo_tv.img/dtbo_ksu.img/g" out/${os_type}_${rom_version}/windows_flash_script.bat
-        sed -i "s/dtbo_tv.img/dtbo_ksu.img/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i '/^REM OFFICAL_BOOT_START/,/^REM OFFICAL_BOOT_END/d' out/${os_type}_${rom_version}/windows_flash_script.bat
-        
-    elif [[ -f "$custom_bootimg_file" ]];then
+        fi
+        sed -i "s/boot_ksu.img/$ksubootimg/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
+        sed -i "s/boot_ksu.img/$ksubootimg/g" out/${os_type}_${rom_version}/windows_flash_script.bat
+        sed -i "s/boot_ksu.img/$ksubootimg/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+    elif [[ -n "$custom_bootimg_file" && -f "$custom_bootimg_file" ]];then
         custombootimg=$(basename "$custom_bootimg_file")
-        mv -f "$custom_bootimg_file" out/${os_type}_${rom_version}/
-        [[ -f "devices/$base_product_device/dtbo_custom.img" ]] && \
+        mv -f "$custom_bootimg_file" "out/${os_type}_${rom_version}/"
+        sed -i "s/boot_ksu.img/$custombootimg/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
+        sed -i "s/boot_ksu.img/$custombootimg/g" out/${os_type}_${rom_version}/windows_flash_script.bat
+        sed -i "s/boot_ksu.img/$custombootimg/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+        if [[ -f "devices/$base_product_device/dtbo_custom.img" ]]; then
             mv -f "devices/$base_product_device/dtbo_custom.img" "out/${os_type}_${rom_version}/firmware-update/dtbo_custom.img"
-        sed -i "s/boot_tv.img/$custombootimg/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/boot_tv.img/$custombootimg/g" out/${os_type}_${rom_version}/windows_flash_script.bat
-        sed -i "s/boot_tv.img/$custombootimg/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i "s/dtbo_tv.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/dtbo_tv.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/windows_flash_script.bat
-        sed -i "s/dtbo_tv.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        
+            sed -i "s/dtbo_ksu.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
+            sed -i "s/dtbo_ksu.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/windows_flash_script.bat
+            sed -i "s/dtbo_ksu.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+        fi
     fi
+
+    unix2dos out/${os_type}_${rom_version}/windows_flash_script.bat
 
     if [[ "${PORT_LOW_DISK:-false}" == true ]]; then
         # Firmware and boot images have now been staged into the package.
@@ -3135,7 +3144,7 @@ else
     pack_timestamp=$(date +"%m%d%H%M")
     hash="$(port_sha256_file "out/${os_type}_${rom_version}.zip")" || exit 1
     hash="${hash:0:10}"
-    if [[ $pack_type == "EROFS" ]] && [[ -f out/${os_type}_${rom_version}/$ksubootimg ]];then
+    if [[ $pack_type == "EROFS" ]] && [[ -n "${ksubootimg:-}" && -f "out/${os_type}_${rom_version}/${ksubootimg}" ]];then
         pack_type="ROOT_"${pack_type}
     fi
     mv out/${os_type}_${rom_version}.zip out/${os_type}_${rom_version}_${hash}_${port_product_model}_${pack_timestamp}_${pack_type}.zip
