@@ -2747,7 +2747,8 @@ if [[ $pack_method == "stock" ]];then
         [[ -f "${part}" ]] || continue
         partname=$(basename "$part" .img)
         echo "$partname" >> "out/target/product/${base_product_device}/META/ab_partitions.txt"
-        if echo "$super_list" | grep -q -w "$partname"; then
+        if echo "$super_list" | grep -q -w "$partname" || \
+           [[ "$partname" == "odm_dlkm" || "$partname" == "vendor_dlkm" || "$partname" == "system_dlkm" ]]; then
             super_list_info+="$partname "
             _map_targets+=("$partname")
         fi

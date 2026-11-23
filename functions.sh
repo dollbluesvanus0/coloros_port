@@ -5144,6 +5144,19 @@ _port::read_target_prop() {
     printf '%s\n' "${default_val}"
 }
 
+_port::resolve_ota_pre_device() {
+    local detected="${1:-}"
+    if [[ -n "${PORT_OTA_PRE_DEVICE:-}" ]]; then
+        printf '%s\n' "${PORT_OTA_PRE_DEVICE}"
+        return 0
+    fi
+    case "${detected}" in
+        # Unified ferrarri custom recoveries (OrangeFox/TWRP) report RED8ACL1 on CN RMX3300 (RE547F).
+        RE547F) printf 'RED8ACL1\n' ;;
+        *) printf '%s\n' "${detected}" ;;
+    esac
+}
+
 _port::write_ota_metadata() {
     local target_files="$1"
     local metadata_out="$2"
@@ -5154,6 +5167,7 @@ _port::write_ota_metadata() {
     post_spl="$(_port::read_target_prop "${target_files}" "ro.build.version.security_patch" "${portrom_version_security_patch:-}")"
     post_ts="$(_port::read_target_prop "${target_files}" "ro.build.date.utc" "$(date +%s)")"
     pre_device="$(_port::read_target_prop "${target_files}" "ro.product.device" "${base_product_device:-unknown}")"
+    pre_device="$(_port::resolve_ota_pre_device "${pre_device}")"
 
     mkdir -p -- "$(dirname -- "${metadata_out}")" || return 1
     {

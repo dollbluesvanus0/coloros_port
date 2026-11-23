@@ -565,6 +565,54 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
             self.assertTrue(dest.is_file())
 
+    def test_write_ota_metadata_normalizes_rmx3300_and_respects_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tf = root / 'target_files'
+            (tf / 'MY_MANIFEST').mkdir(parents=True)
+            (tf / 'MY_MANIFEST/build.prop').write_text(
+                '\n'.join([
+                    'ro.build.fingerprint=OnePlus/RMX3300/RE547F:17/CP2A.260605.016/1:user/release-keys',
+                    'ro.build.version.incremental=1794225082897',
+                    'ro.build.version.sdk=37',
+                    'ro.build.date.utc=1794225082',
+                    'ro.product.device=RE547F',
+                ]) + '\n',
+                encoding='utf-8',
+            )
+            out_default = root / 'metadata_default'
+            out_override = root / 'metadata_override'
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                _port::write_ota_metadata "{tf.as_posix()}" "{out_default.as_posix()}" || exit 2
+                PORT_OTA_PRE_DEVICE=RE547F _port::write_ota_metadata "{tf.as_posix()}" "{out_override.as_posix()}" || exit 3
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            meta_default = dict(
+                line.split('=', 1)
+                for line in out_default.read_text(encoding='utf-8').splitlines()
+                if '=' in line
+            )
+            meta_override = dict(
+                line.split('=', 1)
+                for line in out_override.read_text(encoding='utf-8').splitlines()
+                if '=' in line
+            )
+            self.assertEqual(meta_default['pre-device'], 'RED8ACL1')
+            self.assertEqual(meta_override['pre-device'], 'RE547F')
+
+    def test_get_super_size_includes_realme_gt2_pro(self):
+        for dev in ('RE547F', 'RED8ACL1', 'RMX3300', 'RMX3301'):
+            res = self.run_bash(f'bash bin/getSuperSize.sh "{dev}"')
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(res.stdout.strip(), '11274289152', dev)
+
+    def test_stock_ota_super_classification_includes_dlkm_partitions(self):
+        text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('[[ "$partname" == "odm_dlkm" || "$partname" == "vendor_dlkm" || "$partname" == "system_dlkm" ]]', text)
+
 
 if __name__ == '__main__':
     unittest.main()

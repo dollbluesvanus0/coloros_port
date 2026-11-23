@@ -10,6 +10,8 @@ case $device_code in
     #Oppo Find X3 Pro
     OP4E3F | OP4F57L1) size=11186208768;;
 	RE54E4L1| RMX3371) size=11274289152;;
+	# Realme GT 2 Pro
+	RE547F | RED8ACL1 | RMX3300 | RMX3301) size=11274289152;;
 	# Oplus ACE3V
 	OP5CFBL1) size=16106127360;; 
     #OP5CFBL1) size=16105078784;;
