@@ -3874,11 +3874,12 @@ _port::download_valid_apk() {
     local dest="$2"
     local min_bytes="${3:-65536}"
     local tmp_file="${dest}.tmp.$$"
+    local ua="Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     mkdir -p "$(dirname "${dest}")" || return 1
     rm -f -- "${tmp_file}"
 
-    if ! curl -fsSL --connect-timeout 15 --max-time 240 --retry 2 -o "${tmp_file}" -- "${url}"; then
+    if ! curl -fsSL -A "${ua}" --connect-timeout 15 --speed-limit 8192 --speed-time 25 --max-time 120 --retry 2 --retry-delay 2 -o "${tmp_file}" -- "${url}"; then
         rm -f -- "${tmp_file}"
         return 1
     fi
@@ -3895,10 +3896,28 @@ _port::download_valid_apk() {
             rm -f -- "${tmp_file}"
             return 1
         fi
+        if ! unzip -Z1 "${tmp_file}" 2>/dev/null | grep -qx 'AndroidManifest\.xml'; then
+            rm -f -- "${tmp_file}"
+            return 1
+        fi
     fi
 
     mv -f -- "${tmp_file}" "${dest}" || { rm -f -- "${tmp_file}"; return 1; }
     return 0
+}
+
+_port::download_apk_from_mirrors() {
+    local dest="$1"
+    local min_bytes="$2"
+    shift 2
+    local mirror_url
+    for mirror_url in "$@"; do
+        [[ -n "${mirror_url}" ]] || continue
+        if _port::download_valid_apk "${mirror_url}" "${dest}" "${min_bytes}"; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 _port::find_local_preinstall_apk() {
@@ -4037,13 +4056,15 @@ _port::install_preinstalled_apps() {
             via_apk="${cache_dir}/Via.apk"
             blue "从 APKMirror 下载 Via 浏览器 APK..." "Downloading Via Browser APK from APKMirror..."
             if ! _port::download_apkmirror_apk "via" "${via_apk}" 500000 "${target_sdk}"; then
-                yellow "APKMirror 下载 Via 失败，尝试官方 CDN..." "APKMirror Via download failed; trying official CDN..."
-                if ! _port::download_valid_apk "https://res.viayoo.com/v1/via-release.apk" "${via_apk}" 500000; then
-                    _port::download_valid_apk "https://res.viayoo.com/v1/via-release-cn.apk" "${via_apk}" 500000 || {
-                        error "下载 Via 浏览器失败" "Failed to download Via Browser APK"
-                        return 1
-                    }
-                fi
+                yellow "APKMirror 下载 Via 失败，尝试 APKPure 与官方 CDN 镜像..." \
+                    "APKMirror Via download failed; trying APKPure and official CDN mirrors..."
+                _port::download_apk_from_mirrors "${via_apk}" 500000 \
+                    "https://d.apkpure.com/b/APK/mark.via.gp?version=latest" \
+                    "https://res.viayoo.com/v1/via-release.apk" \
+                    "https://res.viayoo.com/v1/via-release-cn.apk" || {
+                    error "下载 Via 浏览器失败" "Failed to download Via Browser APK"
+                    return 1
+                }
             fi
         fi
         _port::install_apk_to_partition "${via_apk}" "Via" "product/app" || return 1
@@ -4070,8 +4091,8 @@ _port::install_preinstalled_apps() {
                 blue "从 APKMirror 下载 Google Play 商店 (Phonesky.apk)..." \
                     "Downloading Google Play Store (Phonesky.apk) from APKMirror..."
                 if ! _port::download_apkmirror_apk "phonesky" "${phonesky_apk}" 5000000 "${target_sdk}"; then
-                    yellow "APKMirror 下载 Phonesky 失败，尝试 MindTheGapps..." \
-                        "APKMirror Phonesky download failed; trying MindTheGapps fallback..."
+                    yellow "APKMirror 下载 Phonesky 失败，尝试 MindTheGapps 与 APKPure..." \
+                        "APKMirror Phonesky download failed; trying MindTheGapps and APKPure fallbacks..."
                     local mt_branch mt_branches=""
                     case "${port_android_version:-}" in
                         17) mt_branches="cinnamonbun baklava vic" ;;
@@ -4080,21 +4101,15 @@ _port::install_preinstalled_apps() {
                         14) mt_branches="upsilon vic" ;;
                         *) mt_branches="cinnamonbun baklava vic" ;;
                     esac
-                    local downloaded_phonesky=false
+                    local phonesky_mirrors=()
                     for mt_branch in ${mt_branches}; do
-                        blue "下载 Google Play 商店 (${mt_branch})..." \
-                            "Downloading Google Play Store (${mt_branch})..."
-                        if _port::download_valid_apk \
-                            "https://gitlab.com/MindTheGapps/vendor_gapps/-/raw/${mt_branch}/arm64/proprietary/product/priv-app/Phonesky/Phonesky.apk" \
-                            "${phonesky_apk}" 5000000; then
-                            downloaded_phonesky=true
-                            break
-                        fi
+                        phonesky_mirrors+=("https://gitlab.com/MindTheGapps/vendor_gapps/-/raw/${mt_branch}/arm64/proprietary/product/priv-app/Phonesky/Phonesky.apk")
                     done
-                    if [[ "${downloaded_phonesky}" != true ]]; then
+                    phonesky_mirrors+=("https://d.apkpure.com/b/APK/com.android.vending?version=latest")
+                    _port::download_apk_from_mirrors "${phonesky_apk}" 5000000 "${phonesky_mirrors[@]}" || {
                         error "下载 Google Play 商店 (Phonesky.apk) 失败" "Failed to download Google Play Store (Phonesky.apk)"
                         return 1
-                    fi
+                    }
                 fi
             fi
 

@@ -1,8 +1,11 @@
+import gzip
 import io
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -156,6 +159,77 @@ class ApkMirrorTests(unittest.TestCase):
                 zf.writestr("base.apk", b"x" * 70000)
             with self.assertRaises(ValueError):
                 am.verify_standalone_apk(bundle_path, min_bytes=1024)
+
+    def test_fetch_text_decompresses_gzip_payload(self):
+        feed_url = "https://www.apkmirror.com/apk/test/feed/"
+        gz_payload = gzip.compress(SAMPLE_FEED.encode("utf-8"))
+        opener = _FakeOpener({feed_url: gz_payload})
+        text = am.fetch_text(opener, feed_url)
+        self.assertIn("Google Play Store 54.4.11", text)
+
+    def test_403_short_circuits_after_two_forbidden_releases(self):
+        many_releases = "\n".join(
+            f"<item><link>https://www.apkmirror.com/apk/g/app/rel-{i}-release/</link></item>"
+            for i in range(6)
+        )
+        rss = f'<?xml version="1.0"?><rss><channel>{many_releases}</channel></rss>'
+
+        class _ForbiddenOpener(_FakeOpener):
+            def open(self, req, timeout=None):
+                url = req.full_url if hasattr(req, "full_url") else str(req)
+                self.seen_urls.append(url)
+                if url == am.APP_SOURCES["via"].feed_urls[0]:
+                    return _FakeResponse(rss.encode("utf-8"))
+                raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+        opener = _ForbiddenOpener({})
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(RuntimeError) as ctx:
+                am.download_from_apkmirror("via", Path(td) / "Via.apk", opener=opener)
+        self.assertIn("403", str(ctx.exception))
+        # 1 feed request + 2 release requests before failing fast
+        self.assertEqual(len(opener.seen_urls), 3)
+
+    def test_switches_to_curl_transport_on_403_when_no_custom_opener(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "Via.apk"
+            apk_buf = io.BytesIO()
+            with zipfile.ZipFile(apk_buf, "w") as zf:
+                zf.writestr("AndroidManifest.xml", "<manifest package='mark.via.gp'/>")
+                zf.writestr("classes.dex", b"a" * 70000)
+
+            class _UrllibForbiddenOpener(urllib.request.OpenerDirector):
+                def open(self, req, timeout=None):
+                    url = req.full_url if hasattr(req, "full_url") else str(req)
+                    raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+            def _fake_curl(cmd, capture_output=True, text=True, check=False):
+                url = cmd[-1]
+                out_path = None
+                if "-o" in cmd:
+                    out_path = Path(cmd[cmd.index("-o") + 1])
+                if out_path is not None:
+                    out_path.write_bytes(apk_buf.getvalue())
+                    return mock.Mock(returncode=0, stdout="", stderr="")
+                if url.endswith("/feed/"):
+                    return mock.Mock(returncode=0, stdout=SAMPLE_FEED, stderr="")
+                if url.endswith("-release/"):
+                    return mock.Mock(returncode=0, stdout=SAMPLE_RELEASE_HTML, stderr="")
+                if url.endswith("-android-apk-download/"):
+                    return mock.Mock(returncode=0, stdout=SAMPLE_VARIANT_HTML, stderr="")
+                if "download/?key=" in url:
+                    return mock.Mock(returncode=0, stdout=SAMPLE_DL_PAGE_HTML, stderr="")
+                return mock.Mock(returncode=22, stdout="", stderr="404")
+
+            with (
+                mock.patch.object(am, "build_opener", return_value=_UrllibForbiddenOpener()),
+                mock.patch.object(am.shutil, "which", return_value="/usr/bin/curl"),
+                mock.patch.object(am.subprocess, "run", side_effect=_fake_curl),
+            ):
+                saved = am.download_from_apkmirror("phonesky", dest, target_sdk=36, min_bytes=65536)
+
+            self.assertEqual(saved, dest)
+            self.assertTrue(dest.is_file())
 
 
 if __name__ == "__main__":

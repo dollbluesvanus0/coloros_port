@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import gzip
 import html
 import http.cookiejar
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +27,18 @@ USER_AGENT = (
 )
 
 APKMIRROR_BASE = "https://www.apkmirror.com"
+
+_BROWSER_NAV_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
 
 
 @dataclass(frozen=True)
@@ -84,16 +100,18 @@ def fetch_text(
     referer: str | None = None,
     timeout: int = 30,
 ) -> str:
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+    headers = dict(_BROWSER_NAV_HEADERS)
     if referer:
         headers["Referer"] = referer
+        headers["Sec-Fetch-Site"] = "same-origin"
     req = urllib.request.Request(url, headers=headers)
     with opener.open(req, timeout=timeout) as resp:
         data = resp.read()
+        encoding = ""
+        if hasattr(resp, "headers") and resp.headers is not None:
+            encoding = (resp.headers.get("Content-Encoding") or "").lower()
+    if encoding == "gzip" or data[:2] == b"\x1f\x8b":
+        data = gzip.decompress(data)
     return data.decode("utf-8", errors="replace")
 
 
@@ -111,6 +129,7 @@ def download_binary(
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
     }
     if referer:
         headers["Referer"] = referer
@@ -128,6 +147,92 @@ def download_binary(
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+class _CurlTransport:
+    """Cookie-backed curl transport used when urllib hits TLS/HTTP1.1 403 blocks."""
+
+    def __init__(self, curl_bin: str) -> None:
+        self.curl_bin = curl_bin
+        self._tmp_dir = tempfile.TemporaryDirectory(prefix="apkmirror_curl_")
+        self._cookie_jar = str(Path(self._tmp_dir.name) / "cookies.txt")
+
+    def close(self) -> None:
+        self._tmp_dir.cleanup()
+
+    def _base_cmd(self, timeout: int, *, referer: str | None = None) -> list[str]:
+        cmd = [
+            self.curl_bin,
+            "-fsSL",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            str(timeout),
+            "-b",
+            self._cookie_jar,
+            "-c",
+            self._cookie_jar,
+            "-A",
+            USER_AGENT,
+            "-H",
+            f"Accept-Language: {_BROWSER_NAV_HEADERS['Accept-Language']}",
+        ]
+        if referer:
+            cmd.extend(["-e", referer])
+        return cmd
+
+    def fetch_text(self, url: str, *, referer: str | None = None, timeout: int = 30) -> str:
+        cmd = self._base_cmd(timeout, referer=referer) + [
+            "--compressed",
+            "-H",
+            f"Accept: {_BROWSER_NAV_HEADERS['Accept']}",
+            "-H",
+            "Upgrade-Insecure-Requests: 1",
+            "--",
+            url,
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            err = (res.stderr or "").strip() or f"curl exited with code {res.returncode}"
+            if "403" in err or "22" in err:
+                raise urllib.error.HTTPError(url, 403, err, {}, None)
+            raise RuntimeError(err)
+        return res.stdout
+
+    def download_binary(
+        self,
+        url: str,
+        dest: Path,
+        *,
+        referer: str | None = None,
+        min_bytes: int = 65536,
+        timeout: int = 180,
+    ) -> Path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = dest.with_name(f"{dest.name}.tmp.{os.getpid()}")
+        cmd = self._base_cmd(timeout, referer=referer) + [
+            "--speed-limit",
+            "8192",
+            "--speed-time",
+            "25",
+            "-H",
+            "Accept: */*",
+            "-o",
+            str(tmp_path),
+            "--",
+            url,
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode != 0:
+                err = (res.stderr or "").strip() or f"curl exited with code {res.returncode}"
+                raise RuntimeError(err)
+            verify_standalone_apk(tmp_path, min_bytes=min_bytes)
+            os.replace(tmp_path, dest)
+            return dest
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
 
 def verify_standalone_apk(path: Path, min_bytes: int = 65536) -> None:
@@ -267,6 +372,41 @@ def extract_direct_download_url(dl_page_html: str) -> str | None:
     return None
 
 
+def _is_forbidden_error(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError) and exc.code == 403:
+        return True
+    return "403" in str(exc)
+
+
+def _download_single_release(
+    *,
+    rel_url: str,
+    target_sdk: int,
+    min_bytes: int,
+    output: Path,
+    get_text,
+    get_binary,
+) -> Path | None:
+    rel_html = get_text(rel_url, referer=None, timeout=30)
+    variant_url = select_variant_url(rel_html, target_sdk=target_sdk)
+    if not variant_url:
+        return None
+    variant_html = get_text(variant_url, referer=rel_url, timeout=30)
+    btn_url = extract_download_button_url(variant_html)
+    if not btn_url:
+        return None
+    dl_page_html = get_text(btn_url, referer=variant_url, timeout=30)
+    direct_url = extract_direct_download_url(dl_page_html)
+    if not direct_url:
+        return None
+    return get_binary(
+        direct_url,
+        output,
+        referer=btn_url,
+        min_bytes=min_bytes,
+    )
+
+
 def download_from_apkmirror(
     app: str,
     output: Path,
@@ -279,57 +419,120 @@ def download_from_apkmirror(
         raise ValueError(f"Unsupported APKMirror app key: {app}")
     src = APP_SOURCES[app]
     client = opener or build_opener()
+    curl_transport: _CurlTransport | None = None
+    curl_bin = shutil.which("curl") if opener is None else None
 
-    release_urls: list[str] = []
-    for feed_url in src.feed_urls:
-        try:
-            rss_text = fetch_text(client, feed_url)
-            release_urls.extend(extract_release_urls_from_feed(rss_text))
-            if release_urls:
-                break
-        except Exception:
-            continue
+    def _get_text(url: str, *, referer: str | None = None, timeout: int = 30) -> str:
+        if curl_transport is not None:
+            return curl_transport.fetch_text(url, referer=referer, timeout=timeout)
+        return fetch_text(client, url, referer=referer, timeout=timeout)
 
-    if not release_urls:
-        for page_url in src.page_urls:
+    def _get_binary(
+        url: str,
+        dest: Path,
+        *,
+        referer: str | None = None,
+        min_bytes: int = 65536,
+    ) -> Path:
+        if curl_transport is not None:
+            return curl_transport.download_binary(
+                url, dest, referer=referer, min_bytes=min_bytes
+            )
+        return download_binary(client, url, dest, referer=referer, min_bytes=min_bytes)
+
+    def _maybe_switch_to_curl(exc: Exception) -> bool:
+        nonlocal curl_transport
+        if curl_transport is None and curl_bin and _is_forbidden_error(exc):
+            curl_transport = _CurlTransport(curl_bin)
+            return True
+        return False
+
+    try:
+        release_urls: list[str] = []
+        for feed_url in src.feed_urls:
             try:
-                page_html = fetch_text(client, page_url)
-                release_urls.extend(extract_release_urls_from_html(page_html))
+                rss_text = _get_text(feed_url)
+                release_urls.extend(extract_release_urls_from_feed(rss_text))
                 if release_urls:
                     break
-            except Exception:
+            except Exception as exc:
+                if _maybe_switch_to_curl(exc):
+                    try:
+                        rss_text = _get_text(feed_url)
+                        release_urls.extend(extract_release_urls_from_feed(rss_text))
+                        if release_urls:
+                            break
+                    except Exception:
+                        pass
                 continue
 
-    if not release_urls:
-        raise RuntimeError(f"No APKMirror releases found for {app}")
+        if not release_urls:
+            for page_url in src.page_urls:
+                try:
+                    page_html = _get_text(page_url)
+                    release_urls.extend(extract_release_urls_from_html(page_html))
+                    if release_urls:
+                        break
+                except Exception as exc:
+                    if _maybe_switch_to_curl(exc):
+                        try:
+                            page_html = _get_text(page_url)
+                            release_urls.extend(extract_release_urls_from_html(page_html))
+                            if release_urls:
+                                break
+                        except Exception:
+                            pass
+                    continue
 
-    last_error: Exception | None = None
-    for rel_url in release_urls[:6]:
-        try:
-            rel_html = fetch_text(client, rel_url)
-            variant_url = select_variant_url(rel_html, target_sdk=target_sdk)
-            if not variant_url:
-                continue
-            variant_html = fetch_text(client, variant_url, referer=rel_url)
-            btn_url = extract_download_button_url(variant_html)
-            if not btn_url:
-                continue
-            dl_page_html = fetch_text(client, btn_url, referer=variant_url)
-            direct_url = extract_direct_download_url(dl_page_html)
-            if not direct_url:
-                continue
-            return download_binary(
-                client,
-                direct_url,
-                output,
-                referer=btn_url,
-                min_bytes=min_bytes,
-            )
-        except Exception as exc:
-            last_error = exc
-            continue
+        if not release_urls:
+            raise RuntimeError(f"No APKMirror releases found for {app}")
 
-    raise RuntimeError(f"Failed to download standalone APK for {app} from APKMirror: {last_error}")
+        last_error: Exception | None = None
+        forbidden_streak = 0
+        for rel_url in release_urls[:6]:
+            try:
+                downloaded = _download_single_release(
+                    rel_url=rel_url,
+                    target_sdk=target_sdk,
+                    min_bytes=min_bytes,
+                    output=output,
+                    get_text=_get_text,
+                    get_binary=_get_binary,
+                )
+                if downloaded is not None:
+                    return downloaded
+                forbidden_streak = 0
+            except Exception as exc:
+                if _maybe_switch_to_curl(exc):
+                    try:
+                        downloaded = _download_single_release(
+                            rel_url=rel_url,
+                            target_sdk=target_sdk,
+                            min_bytes=min_bytes,
+                            output=output,
+                            get_text=_get_text,
+                            get_binary=_get_binary,
+                        )
+                        if downloaded is not None:
+                            return downloaded
+                        forbidden_streak = 0
+                        continue
+                    except Exception as curl_exc:
+                        exc = curl_exc
+
+                last_error = exc
+                if _is_forbidden_error(exc):
+                    forbidden_streak += 1
+                    if forbidden_streak >= 2:
+                        break
+                else:
+                    forbidden_streak = 0
+                continue
+
+        raise RuntimeError(f"Failed to download standalone APK for {app} from APKMirror: {last_error}")
+    finally:
+        if curl_transport is not None:
+            curl_transport.close()
 
 
 def main(argv: list[str] | None = None) -> int:

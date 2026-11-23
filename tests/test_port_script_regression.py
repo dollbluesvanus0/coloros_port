@@ -565,6 +565,116 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
             self.assertTrue(dest.is_file())
 
+    def test_download_valid_apk_rejects_bundle_zip_and_mirrors_fall_back(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bundle_zip = root / 'bundle.zip'
+            with zipfile.ZipFile(bundle_zip, 'w') as zf:
+                zf.writestr('info.json', '{}')
+                zf.writestr('base.apk', b'x' * 70000)
+
+            valid_apk = root / 'valid.apk'
+            with zipfile.ZipFile(valid_apk, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest/>')
+                zf.writestr('classes.dex', b'x' * 70000)
+
+            dest = root / 'out' / 'Via.apk'
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                curl() {{
+                    local out="" url="" expect_out="" after_dash=false arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            url="$arg"
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        fi
+                    done
+                    if [[ "$url" == *"bundle"* ]]; then
+                        cp -f "{bundle_zip.as_posix()}" "$out"
+                    elif [[ "$url" == *"fail"* ]]; then
+                        return 28
+                    else
+                        cp -f "{valid_apk.as_posix()}" "$out"
+                    fi
+                }}
+                if _port::download_valid_apk "https://example.invalid/bundle.xapk" "{dest.as_posix()}" 1024; then
+                    exit 91
+                fi
+                _port::download_apk_from_mirrors "{dest.as_posix()}" 1024 \
+                    "https://example.invalid/fail.apk" \
+                    "https://example.invalid/bundle.xapk" \
+                    "https://example.invalid/good.apk" || exit 92
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue(dest.is_file())
+
+    def test_install_preinstalled_apps_falls_back_when_apkmirror_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = root / 'build' / 'portrom' / 'images'
+            (port / 'product').mkdir(parents=True, exist_ok=True)
+
+            valid_apk = root / 'valid.apk'
+            with zipfile.ZipFile(valid_apk, 'w', compression=zipfile.ZIP_STORED) as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest package="demo.app"/>')
+                zf.writestr('classes.dex', b'x' * 5_100_000)
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                install_via=true
+                install_play_store=true
+                install_kernelsu=false
+                _port::download_apkmirror_apk() {{ return 1; }}
+                curl() {{
+                    local out="" url="" expect_out="" after_dash=false arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            url="$arg"
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        fi
+                    done
+                    printf '%s\n' "$url" >> "{(root / 'urls.log').as_posix()}"
+                    if [[ "$url" == *"d.apkpure.com/b/APK/mark.via.gp"* ]] || [[ "$url" == *"d.apkpure.com/b/APK/com.android.vending"* ]]; then
+                        cp -f "{valid_apk.as_posix()}" "$out"
+                        return 0
+                    fi
+                    return 22
+                }}
+                _port::install_preinstalled_apps || exit 93
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue((port / 'product' / 'app' / 'Via' / 'Via.apk').is_file())
+            self.assertTrue((port / 'product' / 'priv-app' / 'Phonesky' / 'Phonesky.apk').is_file())
+            urls = (root / 'urls.log').read_text(encoding='utf-8').splitlines()
+            self.assertIn('https://d.apkpure.com/b/APK/mark.via.gp?version=latest', urls)
+            self.assertIn('https://d.apkpure.com/b/APK/com.android.vending?version=latest', urls)
+
     def test_write_ota_metadata_normalizes_rmx3300_and_respects_override(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
