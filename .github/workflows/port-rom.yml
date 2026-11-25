@@ -210,6 +210,7 @@ jobs:
       - name: Port ROM
         timeout-minutes: 240
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           PORT_LOW_DISK: 'true'
           PACK_METHOD: ${{ inputs.pack_method }}
           SECOND_PORT_ROM_URL: ${{ env.SECOND_PORT_ROM_URL }}

@@ -1980,6 +1980,50 @@ analyze_kmi_from_boot() {
     fi
 }
 
+_port::fetch_github_latest_release_doc() {
+    local owner="$1"
+    local repo="$2"
+    local out_file="$3"
+    local api_url="https://api.github.com/repos/${owner}/${repo}/releases/latest"
+    local gh_token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    local -a auth_args=()
+    [[ -n "${gh_token}" ]] && auth_args=(-H "Authorization: Bearer ${gh_token}")
+
+    if curl -fsSL "${auth_args[@]}" --connect-timeout 15 --max-time 60 -o "${out_file}" -- "${api_url}" 2>/dev/null; then
+        if grep -q '/releases/download/' "${out_file}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    local latest_url="https://github.com/${owner}/${repo}/releases/latest"
+    local effective_url="" tag=""
+    effective_url="$(curl -fsSLI --connect-timeout 15 --max-time 30 -o /dev/null -w '%{url_effective}' -- "${latest_url}" 2>/dev/null || true)"
+    tag="${effective_url##*/}"
+    if [[ -n "${tag}" && "${effective_url}" == *"/releases/tag/"* ]]; then
+        local exp_url="https://github.com/${owner}/${repo}/releases/expanded_assets/${tag}"
+        if curl -fsSL --connect-timeout 15 --max-time 60 -o "${out_file}" -- "${exp_url}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+_port::extract_github_asset_url() {
+    local doc_file="$1"
+    local owner="$2"
+    local repo="$3"
+    local asset_regex="$4"
+    local url=""
+    url="$(grep -ioE "\"browser_download_url\": *\"[^\"]*${asset_regex}\"" "${doc_file}" 2>/dev/null | sed -E 's/.*"browser_download_url": *"([^"]*)".*/\1/i' | head -n1)"
+    if [[ -z "${url}" ]]; then
+        local rel_path=""
+        rel_path="$(grep -ioE "/${owner}/${repo}/releases/download/[^\"]*${asset_regex}" "${doc_file}" 2>/dev/null | head -n1)"
+        [[ -n "${rel_path}" ]] && url="https://github.com${rel_path}"
+    fi
+    [[ -n "${url}" ]] || return 1
+    printf '%s\n' "${url}"
+}
+
 # Download KernelSU assets from GitHub release
 # Usage: prepare_ksu_assets <kmi_version>
 # Returns: 0 on success, 1 on failure
@@ -2015,24 +2059,20 @@ prepare_ksu_assets() {
 
     blue "下载 KernelSU 资源..." "Downloading KernelSU assets..."
 
-    local api_url="https://api.github.com/repos/${ksu_repo_owner}/${ksu_repo_name}/releases/latest"
     local temp_json
     temp_json=$(mktemp -p "${work_dir}/tmp")
 
-    # Download release info
-    if ! curl -sL --connect-timeout 15 --max-time 60 "$api_url" -o "$temp_json" 2>/dev/null; then
+    # Download release info (API with token if present, falling back to expanded_assets HTML on 403)
+    if ! _port::fetch_github_latest_release_doc "${ksu_repo_owner}" "${ksu_repo_name}" "${temp_json}"; then
         error "下载 KSU 发布信息失败" "Failed to download KSU release info"
         rm -f "$temp_json"
         return 1
     fi
 
-    # Parse assets using grep/sed (avoiding jq dependency if possible)
-    local download_success=false
-
     # Download ksuinit if needed
     if [[ ! -f "$target_init" ]]; then
         local init_url
-        init_url=$(grep -o '"browser_download_url": "[^"]*ksuinit"' "$temp_json" | sed 's/.*"browser_download_url": "\([^"]*\)".*/\1/' | head -n1)
+        init_url="$(_port::extract_github_asset_url "${temp_json}" "${ksu_repo_owner}" "${ksu_repo_name}" "ksuinit" 2>/dev/null || true)"
         if [[ -n "$init_url" ]]; then
             blue "下载 ksuinit..." "Downloading ksuinit..."
             if curl -sL --connect-timeout 30 --max-time 120 "$init_url" -o "$target_init" 2>/dev/null; then
@@ -2049,7 +2089,7 @@ prepare_ksu_assets() {
     # Download kernel module if needed
     if [[ ! -f "$target_ko" ]]; then
         local ko_url
-        ko_url=$(grep -o '"browser_download_url": "[^"]*'"${ko_filename}"'"' "$temp_json" | sed 's/.*"browser_download_url": "\([^"]*\)".*/\1/' | head -n1)
+        ko_url="$(_port::extract_github_asset_url "${temp_json}" "${ksu_repo_owner}" "${ksu_repo_name}" "${ko_filename}" 2>/dev/null || true)"
         if [[ -n "$ko_url" ]]; then
             blue "下载 ${ko_filename}..." "Downloading ${ko_filename}..."
             if curl -sL --connect-timeout 30 --max-time 120 "$ko_url" -o "$target_ko" 2>/dev/null; then
@@ -4190,16 +4230,15 @@ _port::install_preinstalled_apps() {
         if [[ -z "${ksu_apk}" ]]; then
             local ksu_owner="${ksu_repo_owner:-tiann}"
             local ksu_repo="${ksu_repo_name:-KernelSU}"
-            local api_url="https://api.github.com/repos/${ksu_owner}/${ksu_repo}/releases/latest"
             local json_tmp ksu_apk_url
             mkdir -p "${cache_dir}" || return 1
             json_tmp="$(mktemp "${cache_dir}/.ksu_release.XXXXXX")" || return 1
-            if ! curl -fsSL --connect-timeout 15 --max-time 60 -o "${json_tmp}" -- "${api_url}"; then
+            if ! _port::fetch_github_latest_release_doc "${ksu_owner}" "${ksu_repo}" "${json_tmp}"; then
                 rm -f -- "${json_tmp}"
                 error "查询 KernelSU 最新发布失败" "Failed to query KernelSU latest release"
                 return 1
             fi
-            ksu_apk_url="$(grep -io '"browser_download_url": *"[^"]*KernelSU[^"]*\.apk"' "${json_tmp}" | sed -E 's/.*"browser_download_url": *"([^"]*)".*/\1/i' | head -n1)"
+            ksu_apk_url="$(_port::extract_github_asset_url "${json_tmp}" "${ksu_owner}" "${ksu_repo}" 'KernelSU[^"]*\.apk' 2>/dev/null || true)"
             rm -f -- "${json_tmp}"
             if [[ -z "${ksu_apk_url}" ]]; then
                 error "未找到 KernelSU APK 下载链接" "KernelSU APK download URL not found"

@@ -740,6 +740,74 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             urls = (root / 'urls.log').read_text(encoding='utf-8').splitlines()
             self.assertIn('https://pool.apk.aptoide.com/appupdater/via-test.apk', urls)
 
+    def test_install_preinstalled_apps_kernelsu_falls_back_to_expanded_assets_on_403(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = root / 'build' / 'portrom' / 'images'
+            (port / 'product').mkdir(parents=True, exist_ok=True)
+
+            valid_apk = root / 'ksu.apk'
+            with zipfile.ZipFile(valid_apk, 'w', compression=zipfile.ZIP_STORED) as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest package="me.weishu.kernelsu"/>')
+                zf.writestr('classes.dex', b'x' * 600_000)
+
+            expanded_html = root / 'expanded_assets.html'
+            expanded_html.write_text(
+                '<a href="/tiann/KernelSU/releases/download/v3.3.1/KernelSU_v3.3.1-release.apk">apk</a>\n',
+                encoding='utf-8',
+            )
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                install_via=false
+                install_play_store=false
+                install_kernelsu=true
+                curl() {{
+                    local out="" url="" expect_out="" after_dash=false has_I=false arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            url="$arg"
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        elif [[ "$arg" == *"I"* && "$arg" == -* ]]; then
+                            has_I=true
+                        fi
+                    done
+                    if [[ "$url" == *"api.github.com/"* ]]; then
+                        return 22
+                    fi
+                    if [[ "$url" == "https://github.com/tiann/KernelSU/releases/latest" && "$has_I" == true ]]; then
+                        printf 'https://github.com/tiann/KernelSU/releases/tag/v3.3.1'
+                        return 0
+                    fi
+                    if [[ "$url" == "https://github.com/tiann/KernelSU/releases/expanded_assets/v3.3.1" ]]; then
+                        cp -f "{expanded_html.as_posix()}" "$out"
+                        return 0
+                    fi
+                    if [[ "$url" == "https://github.com/tiann/KernelSU/releases/download/v3.3.1/KernelSU_v3.3.1-release.apk" ]]; then
+                        cp -f "{valid_apk.as_posix()}" "$out"
+                        return 0
+                    fi
+                    return 22
+                }}
+                _port::install_preinstalled_apps || exit 95
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue((port / 'product' / 'app' / 'KernelSU' / 'KernelSU.apk').is_file())
+
     def test_write_ota_metadata_normalizes_rmx3300_and_respects_override(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
