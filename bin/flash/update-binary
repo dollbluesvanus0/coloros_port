@@ -198,6 +198,8 @@ if command -v lptools >/dev/null 2>&1; then
     my_carrier_a my_region_a my_heytap_a my_stock_a my_preload_a \
     my_bigball_a my_manifest_a
   do
+    dyn_part_b="${dyn_part%_a}_b"
+    if [ -e "/dev/block/mapper/${dyn_part_b}" ]; then lptools unmap "$dyn_part_b" >/dev/null 2>&1 || true; fi
     if [ -e "/dev/block/mapper/${dyn_part}" ]; then
       lptools unmap "$dyn_part" >/dev/null 2>&1 || true
       lptools map "$dyn_part" >/dev/null 2>&1 || true

@@ -51,6 +51,14 @@ install_missing_tool() {
 		fi
 	elif command -v apt-get >/dev/null 2>&1; then
 		sudo apt-get update && sudo apt-get install -y "$pkg_apt" || return 1
+	elif command -v dnf >/dev/null 2>&1; then
+		pkg_dnf="$pkg_apt"
+		[ "$pkg_dnf" = "fastboot" ] && pkg_dnf="android-tools"
+		sudo dnf install -y "$pkg_dnf" || return 1
+	elif command -v pacman >/dev/null 2>&1; then
+		pkg_pacman="$pkg_apt"
+		[ "$pkg_pacman" = "fastboot" ] && pkg_pacman="android-tools"
+		sudo pacman -Sy --noconfirm "$pkg_pacman" || return 1
 	else
 		echo "Missing required tool '$tool'. Please install '$pkg_apt' using your package manager." >&2
 		return 1

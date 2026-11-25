@@ -72,8 +72,17 @@ class FlashInstallerStaticTests(unittest.TestCase):
         self.assertNotIn("OFFICAL_BOOT_START", self.port_text)
         # Critical partitions must be optional in mac_linux_flash_script.sh as well as .bat
         self.assertIn('Skipped ${fwimg}_a', self.port_text)
-        # Non-A/B must also strip _a/_b from windows_flash_script.bat
-        self.assertIn('sed -i "/_b/d" out/${os_type}_${rom_version}/windows_flash_script.bat', self.port_text)
+        # Non-A/B must strip only _a/_b slot suffixes (preserving vendor_boot/init_boot)
+        self.assertIn(r"""sed -i -E '/_b([[:space:]"'\'']|$)/d' "${_installer_file}" """.rstrip(), self.port_text)
+        self.assertIn('pack_type="ROOT_${pack_type}"', self.port_text)
+        self.assertNotIn('if [[ $pack_type == "EROFS" ]] && [[ -n "${ksubootimg:-}"', self.port_text)
+
+    def test_oneplus9r_releasetools_uses_assert_and_block_differences(self):
+        rt_text = (ROOT / "devices" / "OnePlus9R" / "releasetools.py").read_text(encoding="utf-8")
+        self.assertIn("assert(getprop(", rt_text)
+        self.assertIn("def FullOTA_GetBlockDifferences(info):", rt_text)
+        self.assertIn("def IncrementalOTA_GetBlockDifferences(info):", rt_text)
+        self.assertIn('"my_bigball"', rt_text)
 
 
 @unittest.skipUnless(BASH_EXE, "Working bash is not available")
@@ -177,7 +186,7 @@ class FlashInstallerBehaviorTests(unittest.TestCase):
             (non_ab_root / "bin/flash/zstd").write_bytes(b"zstd")
             (non_ab_root / "bin/flash/platform-tools-windows").mkdir(parents=True, exist_ok=True)
             (non_ab_root / "bin/flash/platform-tools-windows/fastboot.exe").write_bytes(b"fb")
-            for img in ("boot", "dtbo", "modem", "vbmeta"):
+            for img in ("boot", "dtbo", "modem", "vbmeta", "vendor_boot", "init_boot", "abl"):
                 data = bytearray(256)
                 if img.startswith("vbmeta"):
                     data[:4] = b"AVB0"
@@ -215,9 +224,24 @@ class FlashInstallerBehaviorTests(unittest.TestCase):
                 self.assertNotIn("boot_b", txt)
                 self.assertNotIn("dtbo_a", txt)
                 self.assertNotIn("dtbo_b", txt)
+                self.assertIn("vendor_boot", txt)
+                self.assertIn("init_boot", txt)
             self.assertNotIn("set_active a", nb_bat)
             self.assertNotIn("set_active a", nb_sh)
             self.assertNotIn("set-active-boot-slot", nb_ub)
+            self.assertIn("--disable-verity --disable-verification flash vbmeta firmware-update/vbmeta.img", nb_bat)
+            self.assertIn("--disable-verity --disable-verification flash vbmeta firmware-update/vbmeta.img", nb_sh)
+            self.assertIn("Skipped abl", nb_bat)
+            self.assertIn("Skipped abl", nb_sh)
+            sh_bin = shutil.which("sh") or BASH_EXE
+            self.assertEqual(
+                subprocess.run([sh_bin, "-n", str(nb_dir / "META-INF/com/google/android/update-binary")], capture_output=True, text=True).returncode,
+                0,
+            )
+            self.assertEqual(
+                subprocess.run([BASH_EXE, "-n", str(nb_dir / "mac_linux_flash_script.sh")], capture_output=True, text=True).returncode,
+                0,
+            )
 
     def test_mac_linux_script_transitions_fastbootd_to_bootloader_and_flashes(self):
         with tempfile.TemporaryDirectory() as td:
@@ -320,7 +344,7 @@ exit 0
                 "vbmeta_vendor_a", "vbmeta_vendor_b", "super",
             ):
                 (dev_dir / part).write_bytes(b"")
-            for mp in ("system_a", "my_company_a", "my_stock_a"):
+            for mp in ("system_a", "my_company_a", "my_stock_a", "system_b"):
                 (map_dir / mp).write_bytes(b"")
 
             ub_text = UPDATE_BINARY.read_text(encoding="utf-8")
@@ -388,6 +412,7 @@ with zipfile.ZipFile(zpath) as zf:
             self.assertEqual((dev_dir / "super").read_bytes(), b"SUPERDATA")
 
             acts = actions_log.read_text(encoding="utf-8").splitlines()
+            self.assertIn("lptools unmap system_b", acts)
             self.assertIn("lptools map my_company_a", acts)
             self.assertIn("lptools map my_stock_a", acts)
             self.assertIn("bootctl set-active-boot-slot 0", acts)
