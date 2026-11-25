@@ -5325,8 +5325,6 @@ _port::build_ab_ota_rust() {
     local unsigned_zip="${out_zip}.unsigned.zip"
     (
         trap 'rm -rf -- "${stage_dir}" "${unsigned_zip}"' EXIT
-        local payload_bin="${stage_dir}/payload.bin"
-        local payload_props="${stage_dir}/payload_properties.txt"
         local metadata_file="${stage_dir}/metadata"
         local cpus
         cpus="$(port_cpu_count)"
@@ -5337,8 +5335,6 @@ _port::build_ab_ota_rust() {
             "generate"
             "--images-dir" "${target_files}/IMAGES"
             "--partitions" "${part_csv}"
-            "--out-file" "${payload_bin}"
-            "--properties-out" "${payload_props}"
             "--private-key" "${key_pk8}"
             "--compression" "${comp}"
             "--major-version" "2"
@@ -5358,8 +5354,7 @@ _port::build_ab_ota_rust() {
         if [[ ${rc} -ne 0 ]]; then
             exit "${rc}"
         fi
-        # Free temporary payload.bin before signapk copies into final signed ZIP.
-        rm -f -- "${payload_bin}" "${payload_props}" "${metadata_file}"
+        rm -f -- "${metadata_file}"
         _port::sign_ota_zip "${unsigned_zip}" "${out_zip}" || exit 1
     )
 }

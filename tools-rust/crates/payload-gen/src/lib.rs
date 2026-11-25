@@ -6,10 +6,11 @@
 pub mod crypto;
 pub mod proto;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex};
 
 use anyhow::{bail, ensure, Context, Result};
 use bzip2::read::{BzDecoder, BzEncoder};
@@ -18,7 +19,6 @@ use clap::{Parser, Subcommand, ValueEnum};
 use coloros_common::read_text_lossy;
 use lzma_rust2::{CheckType, XzOptions, XzReader, XzWriter};
 use memmap2::Mmap;
-use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use zip::write::SimpleFileOptions;
@@ -47,7 +47,7 @@ pub struct Cli {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CompressionMode {
-    /// XZ/LZMA2 preset 1 with CRC32 (3-6x faster than standard preset 6)
+    /// XZ/LZMA2 preset 0 with CRC32 (fastest XZ compression)
     #[value(name = "fast-xz")]
     FastXz,
     /// Standard XZ/LZMA2 preset 6 with CRC32
@@ -82,9 +82,9 @@ pub enum Commands {
         #[arg(long)]
         ab_partitions_file: Option<PathBuf>,
 
-        /// Output `payload.bin` path
-        #[arg(long, visible_alias = "output")]
-        out_file: PathBuf,
+        /// Output `payload.bin` path (optional when `--ota-zip` is given)
+        #[arg(long, visible_alias = "output", required_unless_present = "ota_zip")]
+        out_file: Option<PathBuf>,
 
         /// Optional output `payload_properties.txt` path
         #[arg(long, visible_alias = "properties-file")]
@@ -260,7 +260,7 @@ fn compress_chunk(chunk: &[u8], mode: CompressionMode) -> Result<(OperationType,
     match mode {
         CompressionMode::None => Ok((OperationType::Replace, chunk.to_vec())),
         CompressionMode::FastXz | CompressionMode::Xz => {
-            let preset = if mode == CompressionMode::FastXz { 1 } else { 6 };
+            let preset = if mode == CompressionMode::FastXz { 0 } else { 6 };
             let mut opts = XzOptions::with_preset(preset);
             // AOSP update_engine xz-embedded uses CRC32 checks.
             opts.check_type = CheckType::Crc32;
@@ -297,12 +297,30 @@ struct ChunkOutput {
     data_hash: Option<[u8; 32]>,
 }
 
+struct PipelineState {
+    next_to_claim: usize,
+    next_to_write: usize,
+    ready: BTreeMap<usize, ChunkOutput>,
+    aborted: bool,
+    first_err: Option<anyhow::Error>,
+}
+
+/// Configuration for streaming an OTA ZIP directly from `generate_payload`.
+#[derive(Debug, Clone)]
+pub struct OtaZipTarget {
+    pub ota_zip: PathBuf,
+    pub metadata_file: Option<PathBuf>,
+    pub care_map: Option<PathBuf>,
+    pub extra_entries: Vec<(String, PathBuf)>,
+}
+
 /// Configuration for generating a `CrAU` v2 payload.
 #[derive(Debug, Clone)]
 pub struct GenerateConfig {
     pub images_dir: PathBuf,
     pub partitions: Vec<String>,
-    pub out_file: PathBuf,
+    pub out_file: Option<PathBuf>,
+    pub ota_zip: Option<OtaZipTarget>,
     pub properties_out: Option<PathBuf>,
     pub dynamic_partitions_info: Option<PathBuf>,
     pub apex_info: Option<PathBuf>,
@@ -352,7 +370,245 @@ fn encode_signature_proto(raw_sig: &[u8], padded_size: usize) -> Result<Vec<u8>>
     Ok(sigs.encode())
 }
 
-/// Generate a `CrAU` v2 `payload.bin` (and optional `payload_properties.txt`).
+fn hash_padded_slice(raw_slice: &[u8], padded_len: usize) -> [u8; 32] {
+    let mut part_hasher = Sha256::new();
+    part_hasher.update(raw_slice);
+    if padded_len > raw_slice.len() {
+        let pad = vec![0u8; padded_len - raw_slice.len()];
+        part_hasher.update(&pad);
+    }
+    let mut part_hash = [0u8; 32];
+    part_hash.copy_from_slice(&part_hasher.finalize());
+    part_hash
+}
+
+fn append_chunk_op(
+    ch: ChunkOutput,
+    blob_tmp: &mut File,
+    data_offset: &mut u64,
+    operations: &mut Vec<InstallOperation>,
+) -> Result<()> {
+    let extent = Extent {
+        start_block: ch.start_block,
+        num_blocks: ch.num_blocks,
+    };
+    if ch.op_type == OperationType::Zero {
+        operations.push(InstallOperation {
+            op_type: OperationType::Zero,
+            data_offset: None,
+            data_length: None,
+            dst_extents: vec![extent],
+            data_sha256_hash: None,
+        });
+    } else {
+        let len = ch.data.len() as u64;
+        blob_tmp.write_all(&ch.data)?;
+        operations.push(InstallOperation {
+            op_type: ch.op_type,
+            data_offset: Some(*data_offset),
+            data_length: Some(len),
+            dst_extents: vec![extent],
+            data_sha256_hash: ch.data_hash,
+        });
+        *data_offset += len;
+    }
+    Ok(())
+}
+
+fn compress_single_chunk(
+    raw_slice: &[u8],
+    padded_len: usize,
+    idx: usize,
+    chunk_size: usize,
+    block_sz: usize,
+    compression: CompressionMode,
+) -> Result<ChunkOutput> {
+    let raw_len = raw_slice.len();
+    let byte_start = idx * chunk_size;
+    let byte_end = ((idx + 1) * chunk_size).min(padded_len);
+    let start_block = (byte_start / block_sz) as u64;
+    let num_blocks = ((byte_end - byte_start) / block_sz) as u64;
+
+    let (op_type, data) = if byte_end <= raw_len {
+        compress_chunk(&raw_slice[byte_start..byte_end], compression)?
+    } else {
+        let mut owned = Vec::with_capacity(byte_end - byte_start);
+        if byte_start < raw_len {
+            owned.extend_from_slice(&raw_slice[byte_start..raw_len]);
+        }
+        owned.resize(byte_end - byte_start, 0);
+        compress_chunk(&owned, compression)?
+    };
+
+    let data_hash = if op_type == OperationType::Zero {
+        None
+    } else {
+        Some(sha256_bytes(&data))
+    };
+
+    Ok(ChunkOutput {
+        op_type,
+        start_block,
+        num_blocks,
+        data,
+        data_hash,
+    })
+}
+
+/// Process a partition's chunks concurrently using a bounded reorder window while hashing the
+/// raw padded partition in parallel, avoiding batch-boundary idle stalls.
+fn process_partition_chunks(
+    raw_slice: &[u8],
+    padded_len: usize,
+    chunk_size: usize,
+    block_sz: usize,
+    compression: CompressionMode,
+    blob_tmp: &mut File,
+    data_offset: &mut u64,
+) -> Result<([u8; 32], Vec<InstallOperation>)> {
+    let total_chunks = if padded_len == 0 {
+        0
+    } else {
+        padded_len.div_ceil(chunk_size)
+    };
+    if total_chunks == 0 {
+        return Ok((hash_padded_slice(raw_slice, padded_len), Vec::new()));
+    }
+    if total_chunks == 1 {
+        let part_hash = hash_padded_slice(raw_slice, padded_len);
+        let ch = compress_single_chunk(raw_slice, padded_len, 0, chunk_size, block_sz, compression)?;
+        let mut operations = Vec::with_capacity(1);
+        append_chunk_op(ch, blob_tmp, data_offset, &mut operations)?;
+        return Ok((part_hash, operations));
+    }
+
+    let num_workers = rayon::current_num_threads().clamp(1, total_chunks);
+    let max_in_flight = (num_workers * 4).clamp(16, 64);
+    let shared = (
+        Mutex::new(PipelineState {
+            next_to_claim: 0,
+            next_to_write: 0,
+            ready: BTreeMap::new(),
+            aborted: false,
+            first_err: None,
+        }),
+        Condvar::new(),
+    );
+
+    std::thread::scope(|ts| -> Result<([u8; 32], Vec<InstallOperation>)> {
+        let hash_handle = ts.spawn(|| hash_padded_slice(raw_slice, padded_len));
+        let shared_ref = &shared;
+        let workers_handle = ts.spawn(move || {
+            rayon::scope(|rs| {
+                for _ in 0..num_workers {
+                    rs.spawn(|_| {
+                        let (lock, cvar) = shared_ref;
+                        loop {
+                            let idx = {
+                                let mut st = lock.lock().unwrap();
+                                while !st.aborted
+                                    && st.next_to_claim < total_chunks
+                                    && (st.next_to_claim - st.next_to_write) >= max_in_flight
+                                {
+                                    st = cvar.wait(st).unwrap();
+                                }
+                                if st.aborted || st.next_to_claim >= total_chunks {
+                                    return;
+                                }
+                                let idx = st.next_to_claim;
+                                st.next_to_claim += 1;
+                                idx
+                            };
+
+                            let res = compress_single_chunk(
+                                raw_slice,
+                                padded_len,
+                                idx,
+                                chunk_size,
+                                block_sz,
+                                compression,
+                            );
+
+                            let mut st = lock.lock().unwrap();
+                            match res {
+                                Ok(ch) => {
+                                    st.ready.insert(idx, ch);
+                                }
+                                Err(err) => {
+                                    st.aborted = true;
+                                    if st.first_err.is_none() {
+                                        st.first_err = Some(err);
+                                    }
+                                }
+                            }
+                            cvar.notify_all();
+                        }
+                    });
+                }
+            });
+        });
+
+        let mut operations = Vec::with_capacity(total_chunks);
+        let (lock, cvar) = shared_ref;
+        for expected_idx in 0..total_chunks {
+            let ch = {
+                let mut st = lock.lock().unwrap();
+                loop {
+                    if st.aborted {
+                        let err = st
+                            .first_err
+                            .take()
+                            .unwrap_or_else(|| anyhow::anyhow!("Compression worker aborted"));
+                        cvar.notify_all();
+                        return Err(err);
+                    }
+                    if let Some(item) = st.ready.remove(&expected_idx) {
+                        st.next_to_write = expected_idx + 1;
+                        cvar.notify_all();
+                        break item;
+                    }
+                    st = cvar.wait(st).unwrap();
+                }
+            };
+            if let Err(err) = append_chunk_op(ch, blob_tmp, data_offset, &mut operations) {
+                let mut st = lock.lock().unwrap();
+                st.aborted = true;
+                cvar.notify_all();
+                return Err(err);
+            }
+        }
+
+        let _ = workers_handle.join();
+        let part_hash = hash_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("Partition hash thread panicked"))?;
+        Ok((part_hash, operations))
+    })
+}
+
+fn write_payload_stream<W: Write>(
+    out: W,
+    header: &[u8],
+    manifest_bytes: &[u8],
+    metadata_sig_proto: Option<&[u8]>,
+    blob_tmp: &mut File,
+    eof_sig_proto: Option<&[u8]>,
+) -> Result<([u8; 32], u64)> {
+    let mut writer = HashingWriter::new(out);
+    writer.write_all(header)?;
+    writer.write_all(manifest_bytes)?;
+    if let Some(ms) = metadata_sig_proto {
+        writer.write_all(ms)?;
+    }
+    blob_tmp.seek(SeekFrom::Start(0))?;
+    io::copy(blob_tmp, &mut writer)?;
+    if let Some(es) = eof_sig_proto {
+        writer.write_all(es)?;
+    }
+    Ok(writer.finish()?)
+}
+
+/// Generate a `CrAU` v2 `payload.bin` (and optional `payload_properties.txt` / streamed OTA ZIP).
 pub fn generate_payload(cfg: &GenerateConfig) -> Result<PayloadProperties> {
     ensure!(cfg.block_size > 0 && cfg.block_size.is_multiple_of(512), "Invalid block_size {}", cfg.block_size);
     ensure!(
@@ -363,6 +619,10 @@ pub fn generate_payload(cfg: &GenerateConfig) -> Result<PayloadProperties> {
     );
     ensure!(!cfg.partitions.is_empty(), "No partitions specified");
     ensure!(cfg.major_version == 2, "Only major_version=2 is supported");
+    ensure!(
+        cfg.out_file.is_some() || cfg.ota_zip.is_some(),
+        "Specify --out-file or --ota-zip"
+    );
 
     let signing_key = match cfg.private_key.as_deref() {
         Some(path) => Some(RsaPrivateKey::from_file(path)?),
@@ -395,13 +655,17 @@ pub fn generate_payload(cfg: &GenerateConfig) -> Result<PayloadProperties> {
         None => Vec::new(),
     };
 
-    if let Some(parent) = cfg.out_file.parent() {
+    let primary_out = cfg
+        .out_file
+        .as_deref()
+        .or_else(|| cfg.ota_zip.as_ref().map(|z| z.ota_zip.as_path()))
+        .context("Missing output path")?;
+    if let Some(parent) = primary_out.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
-    let out_parent = cfg
-        .out_file
+    let out_parent = primary_out
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
@@ -409,13 +673,8 @@ pub fn generate_payload(cfg: &GenerateConfig) -> Result<PayloadProperties> {
         .context("Failed to create temporary blob staging file")?;
 
     let mut data_offset: u64 = 0;
-    let mut data_hasher = Sha256::new();
     let mut partition_updates = Vec::with_capacity(cfg.partitions.len());
     let block_sz = cfg.block_size as usize;
-
-    // Process each partition in deterministic order, parallelizing 2 MiB chunks in bounded windows
-    // so peak memory stays small (~batch_chunks * 2 MiB) even for multi-GB images.
-    let batch_chunks = (rayon::current_num_threads() * 4).clamp(16, 64);
 
     for part_name in &cfg.partitions {
         let img_path = cfg.images_dir.join(format!("{part_name}.img"));
@@ -436,91 +695,15 @@ pub fn generate_payload(cfg: &GenerateConfig) -> Result<PayloadProperties> {
         };
         let raw_slice: &[u8] = mmap.as_deref().unwrap_or(&[]);
 
-        let mut part_hasher = Sha256::new();
-        part_hasher.update(raw_slice);
-        if padded_len > raw_len {
-            let pad = vec![0u8; padded_len - raw_len];
-            part_hasher.update(&pad);
-        }
-        let mut part_hash = [0u8; 32];
-        part_hash.copy_from_slice(&part_hasher.finalize());
-
-        let total_chunks = if padded_len == 0 {
-            0
-        } else {
-            padded_len.div_ceil(cfg.chunk_size)
-        };
-
-        let mut operations = Vec::with_capacity(total_chunks);
-        let mut chunk_idx = 0usize;
-
-        while chunk_idx < total_chunks {
-            let batch_end = (chunk_idx + batch_chunks).min(total_chunks);
-            let results: Vec<ChunkOutput> = (chunk_idx..batch_end)
-                .into_par_iter()
-                .map(|idx| -> Result<ChunkOutput> {
-                    let byte_start = idx * cfg.chunk_size;
-                    let byte_end = ((idx + 1) * cfg.chunk_size).min(padded_len);
-                    let start_block = (byte_start / block_sz) as u64;
-                    let num_blocks = ((byte_end - byte_start) / block_sz) as u64;
-
-                    let (op_type, data) = if byte_end <= raw_len {
-                        compress_chunk(&raw_slice[byte_start..byte_end], cfg.compression)?
-                    } else {
-                        let mut owned = Vec::with_capacity(byte_end - byte_start);
-                        if byte_start < raw_len {
-                            owned.extend_from_slice(&raw_slice[byte_start..raw_len]);
-                        }
-                        owned.resize(byte_end - byte_start, 0);
-                        compress_chunk(&owned, cfg.compression)?
-                    };
-
-                    let data_hash = if op_type == OperationType::Zero {
-                        None
-                    } else {
-                        Some(sha256_bytes(&data))
-                    };
-
-                    Ok(ChunkOutput {
-                        op_type,
-                        start_block,
-                        num_blocks,
-                        data,
-                        data_hash,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-
-            for ch in results {
-                let extent = Extent {
-                    start_block: ch.start_block,
-                    num_blocks: ch.num_blocks,
-                };
-                if ch.op_type == OperationType::Zero {
-                    operations.push(InstallOperation {
-                        op_type: OperationType::Zero,
-                        data_offset: None,
-                        data_length: None,
-                        dst_extents: vec![extent],
-                        data_sha256_hash: None,
-                    });
-                } else {
-                    let len = ch.data.len() as u64;
-                    blob_tmp.write_all(&ch.data)?;
-                    data_hasher.update(&ch.data);
-                    operations.push(InstallOperation {
-                        op_type: ch.op_type,
-                        data_offset: Some(data_offset),
-                        data_length: Some(len),
-                        dst_extents: vec![extent],
-                        data_sha256_hash: ch.data_hash,
-                    });
-                    data_offset += len;
-                }
-            }
-
-            chunk_idx = batch_end;
-        }
+        let (part_hash, operations) = process_partition_chunks(
+            raw_slice,
+            padded_len,
+            cfg.chunk_size,
+            block_sz,
+            cfg.compression,
+            blob_tmp.as_file_mut(),
+            &mut data_offset,
+        )?;
 
         partition_updates.push(PartitionUpdate {
             partition_name: part_name.clone(),
@@ -605,23 +788,58 @@ pub fn generate_payload(cfg: &GenerateConfig) -> Result<PayloadProperties> {
         (None, None)
     };
 
-    // Assemble final `payload.bin` while hashing the entire file for `FILE_HASH`.
-    let out_file = File::create(&cfg.out_file)
-        .with_context(|| format!("Failed to create {}", cfg.out_file.display()))?;
-    let mut writer = HashingWriter::new(BufWriter::with_capacity(1024 * 1024, out_file));
-    writer.write_all(&header)?;
-    writer.write_all(&manifest_bytes)?;
-    if let Some(ref ms) = metadata_sig_proto {
-        writer.write_all(ms)?;
-    }
-
-    blob_tmp.seek(SeekFrom::Start(0))?;
-    io::copy(&mut blob_tmp, &mut writer)?;
-
-    if let Some(ref es) = eof_sig_proto {
-        writer.write_all(es)?;
-    }
-    let (file_hash_bytes, file_size) = writer.finish()?;
+    let (file_hash_bytes, file_size) = if let Some(ref out_path) = cfg.out_file {
+        let out_file = File::create(out_path)
+            .with_context(|| format!("Failed to create {}", out_path.display()))?;
+        write_payload_stream(
+            BufWriter::with_capacity(1024 * 1024, out_file),
+            &header,
+            &manifest_bytes,
+            metadata_sig_proto.as_deref(),
+            blob_tmp.as_file_mut(),
+            eof_sig_proto.as_deref(),
+        )?
+    } else {
+        let ota = cfg.ota_zip.as_ref().context("Missing --ota-zip target")?;
+        if let Some(parent) = ota.ota_zip.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let zip_file = File::create(&ota.ota_zip)
+            .with_context(|| format!("Failed to create OTA ZIP: {}", ota.ota_zip.display()))?;
+        let mut zw = ZipWriter::new(BufWriter::with_capacity(1024 * 1024, zip_file));
+        let stored_opts = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .large_file(true);
+        zw.start_file("payload.bin", stored_opts)?;
+        let res = write_payload_stream(
+            &mut zw,
+            &header,
+            &manifest_bytes,
+            metadata_sig_proto.as_deref(),
+            blob_tmp.as_file_mut(),
+            eof_sig_proto.as_deref(),
+        )?;
+        let props = PayloadProperties {
+            file_hash: base64_encode(&res.0),
+            file_size: res.1,
+            metadata_hash: base64_encode(&metadata_hash),
+            metadata_size,
+        };
+        zw.start_file("payload_properties.txt", stored_opts)?;
+        zw.write_all(props.format_text().as_bytes())?;
+        write_zip_optional_entries(
+            &mut zw,
+            stored_opts,
+            ota.metadata_file.as_deref(),
+            ota.care_map.as_deref(),
+            cfg.apex_info.as_deref(),
+            &ota.extra_entries,
+        )?;
+        zw.finish()?.flush()?;
+        res
+    };
 
     let props = PayloadProperties {
         file_hash: base64_encode(&file_hash_bytes),
@@ -638,6 +856,23 @@ pub fn generate_payload(cfg: &GenerateConfig) -> Result<PayloadProperties> {
         }
         fs::write(prop_path, props.format_text())
             .with_context(|| format!("Failed to write {}", prop_path.display()))?;
+    }
+
+    if cfg.out_file.is_some() {
+        if let Some(ref ota) = cfg.ota_zip {
+            let out_payload = cfg.out_file.as_deref().context("Missing payload file")?;
+            let props_tmp = NamedTempFile::new_in(out_parent)?;
+            fs::write(props_tmp.path(), props.format_text())?;
+            package_ota_zip(
+                &ota.ota_zip,
+                out_payload,
+                props_tmp.path(),
+                ota.metadata_file.as_deref(),
+                ota.care_map.as_deref(),
+                cfg.apex_info.as_deref(),
+                &ota.extra_entries,
+            )?;
+        }
     }
 
     Ok(props)
@@ -679,6 +914,46 @@ impl<W: Write> Write for HashingWriter<W> {
     }
 }
 
+fn add_stored_zip_entry<W: Write + Seek>(
+    zw: &mut ZipWriter<W>,
+    stored_opts: SimpleFileOptions,
+    zip_name: &str,
+    src_path: &Path,
+) -> Result<()> {
+    let mut src = BufReader::with_capacity(
+        1024 * 1024,
+        File::open(src_path).with_context(|| {
+            format!("Failed to open {} for OTA ZIP entry {zip_name}", src_path.display())
+        })?,
+    );
+    zw.start_file(zip_name, stored_opts)?;
+    io::copy(&mut src, zw)?;
+    Ok(())
+}
+
+fn write_zip_optional_entries<W: Write + Seek>(
+    zw: &mut ZipWriter<W>,
+    stored_opts: SimpleFileOptions,
+    metadata: Option<&Path>,
+    care_map: Option<&Path>,
+    apex_info: Option<&Path>,
+    extra_entries: &[(String, PathBuf)],
+) -> Result<()> {
+    if let Some(m) = metadata {
+        add_stored_zip_entry(zw, stored_opts, "META-INF/com/android/metadata", m)?;
+    }
+    if let Some(cm) = care_map {
+        add_stored_zip_entry(zw, stored_opts, "care_map.pb", cm)?;
+    }
+    if let Some(ai) = apex_info {
+        add_stored_zip_entry(zw, stored_opts, "apex_info.pb", ai)?;
+    }
+    for (zip_path, local_path) in extra_entries {
+        add_stored_zip_entry(zw, stored_opts, zip_path, local_path)?;
+    }
+    Ok(())
+}
+
 /// Package `payload.bin`, `payload_properties.txt`, and optional metadata files into an
 /// uncompressed (`ZIP_STORED` + ZIP64) OTA ZIP archive.
 pub fn package_ota_zip(
@@ -703,29 +978,9 @@ pub fn package_ota_zip(
         .compression_method(CompressionMethod::Stored)
         .large_file(true);
 
-    let mut add_stored = |zip_name: &str, src_path: &Path| -> Result<()> {
-        let mut src = BufReader::with_capacity(1024 * 1024, File::open(src_path).with_context(|| {
-            format!("Failed to open {} for OTA ZIP entry {zip_name}", src_path.display())
-        })?);
-        zw.start_file(zip_name, stored_opts)?;
-        io::copy(&mut src, &mut zw)?;
-        Ok(())
-    };
-
-    add_stored("payload.bin", payload)?;
-    add_stored("payload_properties.txt", properties)?;
-    if let Some(m) = metadata {
-        add_stored("META-INF/com/android/metadata", m)?;
-    }
-    if let Some(cm) = care_map {
-        add_stored("care_map.pb", cm)?;
-    }
-    if let Some(ai) = apex_info {
-        add_stored("apex_info.pb", ai)?;
-    }
-    for (zip_path, local_path) in extra_entries {
-        add_stored(zip_path, local_path)?;
-    }
+    add_stored_zip_entry(&mut zw, stored_opts, "payload.bin", payload)?;
+    add_stored_zip_entry(&mut zw, stored_opts, "payload_properties.txt", properties)?;
+    write_zip_optional_entries(&mut zw, stored_opts, metadata, care_map, apex_info, extra_entries)?;
 
     zw.finish()?.flush()?;
     Ok(())
@@ -982,19 +1237,22 @@ pub fn run_cli(cli: Cli) -> Result<()> {
                 ab_partitions_file.as_deref(),
             )?;
 
-            let effective_props_out = if ota_zip.is_some() && properties_out.is_none() {
-                Some(out_file.with_extension("properties.txt"))
-            } else {
-                properties_out
-            };
+            let parsed_extra = parse_extra_entries(&extra_entries)?;
+            let ota_target = ota_zip.as_ref().map(|zip_out| OtaZipTarget {
+                ota_zip: zip_out.clone(),
+                metadata_file: metadata_file.clone(),
+                care_map: care_map.clone(),
+                extra_entries: parsed_extra,
+            });
 
             let cfg = GenerateConfig {
                 images_dir,
                 partitions: part_names,
                 out_file: out_file.clone(),
-                properties_out: effective_props_out.clone(),
+                ota_zip: ota_target,
+                properties_out,
                 dynamic_partitions_info,
-                apex_info: apex_info.clone(),
+                apex_info,
                 private_key,
                 signature_size,
                 compression,
@@ -1007,26 +1265,21 @@ pub fn run_cli(cli: Cli) -> Result<()> {
             };
 
             let props = generate_payload(&cfg)?;
-            println!(
-                "[+] payload-gen: generated {} (size={} bytes, metadata_size={})",
-                out_file.display(),
-                props.file_size,
-                props.metadata_size
-            );
-
+            if let Some(ref payload_path) = out_file {
+                println!(
+                    "[+] payload-gen: generated {} (size={} bytes, metadata_size={})",
+                    payload_path.display(),
+                    props.file_size,
+                    props.metadata_size
+                );
+            }
             if let Some(ref zip_out) = ota_zip {
-                let props_file = effective_props_out.as_deref().context("Missing properties file")?;
-                let parsed_extra = parse_extra_entries(&extra_entries)?;
-                package_ota_zip(
-                    zip_out,
-                    &out_file,
-                    props_file,
-                    metadata_file.as_deref(),
-                    care_map.as_deref(),
-                    apex_info.as_deref(),
-                    &parsed_extra,
-                )?;
-                println!("[+] payload-gen: packaged uncompressed OTA ZIP {}", zip_out.display());
+                println!(
+                    "[+] payload-gen: packaged uncompressed OTA ZIP {} (payload_size={} bytes, metadata_size={})",
+                    zip_out.display(),
+                    props.file_size,
+                    props.metadata_size
+                );
             }
             Ok(())
         }
@@ -1212,5 +1465,55 @@ virtual_ab_compression=true
             let za = zip::ZipArchive::new(File::open(&out_zip).unwrap()).unwrap();
             assert_eq!(za.len(), 3);
         }
+
+        // Verify streaming directly into --ota-zip without --out-file produces an identical verified payload.
+        let streamed_zip = td.path().join("streamed_ota.zip");
+        let meta_file = td.path().join("streamed_metadata");
+        fs::write(&meta_file, "ota-type=AB\n").unwrap();
+        run_cli(Cli::parse_from([
+            "payload-gen",
+            "generate",
+            "--images-dir",
+            img_dir.to_str().unwrap(),
+            "--partitions",
+            "system,boot",
+            "--dynamic-partitions-info",
+            dpm_path.to_str().unwrap(),
+            "--private-key",
+            priv_key.to_str().unwrap(),
+            "--compression",
+            "fast-xz",
+            "--chunk-size",
+            "4096",
+            "--minor-version",
+            "0",
+            "--ota-zip",
+            streamed_zip.to_str().unwrap(),
+            "--metadata-file",
+            meta_file.to_str().unwrap(),
+        ]))
+        .unwrap();
+
+        let mut za = zip::ZipArchive::new(File::open(&streamed_zip).unwrap()).unwrap();
+        assert_eq!(za.len(), 3);
+        let extracted_payload = td.path().join("extracted_payload.bin");
+        {
+            let mut entry = za.by_name("payload.bin").unwrap();
+            let mut out = File::create(&extracted_payload).unwrap();
+            io::copy(&mut entry, &mut out).unwrap();
+        }
+        let streamed_props = {
+            let mut s = String::new();
+            za.by_name("payload_properties.txt")
+                .unwrap()
+                .read_to_string(&mut s)
+                .unwrap();
+            s
+        };
+        verify_payload_file(&extracted_payload, Some(&pub_cert)).unwrap();
+        let streamed_bytes = fs::read(&extracted_payload).unwrap();
+        let streamed_hash = base64_encode(&sha256_bytes(&streamed_bytes));
+        assert!(streamed_props.contains(&format!("FILE_HASH={streamed_hash}\n")));
+        assert!(streamed_props.contains(&format!("FILE_SIZE={}\n", streamed_bytes.len())));
     }
 }

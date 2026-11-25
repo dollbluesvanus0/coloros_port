@@ -2756,16 +2756,24 @@ if [[ $pack_method == "stock" ]];then
             _map_targets+=("$partname")
         fi
     done < <(printf '%s\n' out/target/product/${base_product_device}/IMAGES/*.img | LC_ALL=C sort)
-    if [[ ${#_map_targets[@]} -gt 0 ]]; then
-        _map_jobs="$(port_cpu_count)"
-        (( _map_jobs > 32 )) && _map_jobs=32
-        PORT_OTA_IMAGES_DIR="${work_dir}/out/target/product/${base_product_device}/IMAGES"
-        export PORT_OTA_IMAGES_DIR
-        blue "并行生成分区 .map 文件 (${_map_jobs} 线程)" "Generating partition .map files in parallel (${_map_jobs} job(s))"
-        port_run_jobs "${_map_jobs}" "${work_dir}/build/logs/map-gen" _port::generate_map_file "${_map_targets[@]}" || {
-            error "生成 .map 文件失败" "Failed to generate partition .map files"
-            exit 1
-        }
+    _ota_maps_ready=false
+    _port::ensure_ota_map_files() {
+        [[ "${_ota_maps_ready}" == true ]] && return 0
+        if [[ ${#_map_targets[@]} -gt 0 ]]; then
+            _map_jobs="$(port_cpu_count)"
+            (( _map_jobs > 32 )) && _map_jobs=32
+            PORT_OTA_IMAGES_DIR="${work_dir}/out/target/product/${base_product_device}/IMAGES"
+            export PORT_OTA_IMAGES_DIR
+            blue "并行生成分区 .map 文件 (${_map_jobs} 线程)" "Generating partition .map files in parallel (${_map_jobs} job(s))"
+            port_run_jobs "${_map_jobs}" "${work_dir}/build/logs/map-gen" _port::generate_map_file "${_map_targets[@]}" || {
+                error "生成 .map 文件失败" "Failed to generate partition .map files"
+                exit 1
+            }
+        fi
+        _ota_maps_ready=true
+    }
+    if [[ "${is_ab_device}" != true || "${ota_engine}" == "delta" || "${ota_engine}" == "stock" ]]; then
+        _port::ensure_ota_map_files
     fi
     rm -rf out/target/product/${base_product_device}/META/dynamic_partitions_info.txt
     let groupSize=superSize-1048576
@@ -2895,6 +2903,7 @@ if [[ $pack_method == "stock" ]];then
                 _ota_built=true
                 ;;
             delta)
+                _port::ensure_ota_map_files
                 _port::build_ab_ota_delta "${_ota_target_files}" "${_ota_out_zip}" || {
                     error "delta_generator 不可用或生成 OTA 失败" "delta_generator unavailable or OTA generation failed"
                     exit 1
@@ -2904,16 +2913,20 @@ if [[ $pack_method == "stock" ]];then
             auto)
                 if type _port::build_ab_ota_rust >/dev/null 2>&1 && _port::build_ab_ota_rust "${_ota_target_files}" "${_ota_out_zip}"; then
                     _ota_built=true
-                elif _port::build_ab_ota_delta "${_ota_target_files}" "${_ota_out_zip}"; then
-                    _ota_built=true
                 else
-                    yellow "快速 A/B OTA 路径不可用，回退到 ota_from_target_files" "Fast A/B OTA path unavailable; falling back to ota_from_target_files"
+                    _port::ensure_ota_map_files
+                    if _port::build_ab_ota_delta "${_ota_target_files}" "${_ota_out_zip}"; then
+                        _ota_built=true
+                    else
+                        yellow "快速 A/B OTA 路径不可用，回退到 ota_from_target_files" "Fast A/B OTA path unavailable; falling back to ota_from_target_files"
+                    fi
                 fi
                 ;;
             stock) ;;
         esac
     fi
     if [[ "${_ota_built}" != true ]]; then
+        _port::ensure_ota_map_files
         pushd otatools || exit 1
         export PATH=$(pwd)/bin/:$PATH
         ./bin/ota_from_target_files --partial= --force_minor_version 9 "${_ota_target_files}/" "${_ota_out_zip}" || exit 1

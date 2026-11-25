@@ -116,7 +116,9 @@ class PortScriptStaticRegressionTests(unittest.TestCase):
             self.assertIn(f'{fn_name}()', self.functions_text)
         self.assertIn('_port::build_ab_ota_rust', self.port_text)
         self.assertIn('_port::build_ab_ota_delta', self.port_text)
+        self.assertIn('_port::ensure_ota_map_files()', self.port_text)
         self.assertIn('PORT_DISABLE_PAYLOAD_GEN', self.functions_text)
+        self.assertNotIn('"--out-file" "${payload_bin}"', self.functions_text)
 
     def test_setup_sh_installs_jq_and_dos2unix_on_all_platforms(self):
         for line_marker in ('x86_64', 'aarch64', 'Darwin'):
