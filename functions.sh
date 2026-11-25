@@ -3906,6 +3906,45 @@ _port::download_valid_apk() {
     return 0
 }
 
+_port::resolve_aptoide_apk_url() {
+    local pkg="$1"
+    local expected_rank="${2:-TRUSTED}"
+    local api_url="https://ws75.aptoide.com/api/7/app/get/package_name=${pkg}"
+    local ua="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    local tmp_json
+    tmp_json="$(mktemp)" || return 1
+    if ! curl -fsSL -A "${ua}" --connect-timeout 15 --max-time 30 -o "${tmp_json}" -- "${api_url}" 2>/dev/null; then
+        rm -f -- "${tmp_json}"
+        return 1
+    fi
+    local resolved=""
+    resolved="$(python3 - "${tmp_json}" "${pkg}" "${expected_rank}" <<'PY'
+import json, sys
+json_path, pkg, expected_rank = sys.argv[1:4]
+try:
+    with open(json_path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    meta = data["nodes"]["meta"]["data"]
+    if meta.get("package") != pkg:
+        raise SystemExit(1)
+    f = meta["file"]
+    if f.get("splits"):
+        raise SystemExit(1)
+    rank = (f.get("malware") or {}).get("rank", "")
+    if expected_rank and rank != expected_rank:
+        raise SystemExit(1)
+    path = f.get("path") or f.get("path_alt") or ""
+    if path.startswith("https://"):
+        print(path)
+except Exception:
+    raise SystemExit(1)
+PY
+)"
+    rm -f -- "${tmp_json}"
+    [[ -n "${resolved}" ]] || return 1
+    printf '%s\n' "${resolved}"
+}
+
 _port::download_apk_from_mirrors() {
     local dest="$1"
     local min_bytes="$2"
@@ -4056,12 +4095,17 @@ _port::install_preinstalled_apps() {
             via_apk="${cache_dir}/Via.apk"
             blue "从 APKMirror 下载 Via 浏览器 APK..." "Downloading Via Browser APK from APKMirror..."
             if ! _port::download_apkmirror_apk "via" "${via_apk}" 500000 "${target_sdk}"; then
-                yellow "APKMirror 下载 Via 失败，尝试 APKPure 与官方 CDN 镜像..." \
-                    "APKMirror Via download failed; trying APKPure and official CDN mirrors..."
-                _port::download_apk_from_mirrors "${via_apk}" 500000 \
-                    "https://d.apkpure.com/b/APK/mark.via.gp?version=latest" \
-                    "https://res.viayoo.com/v1/via-release.apk" \
-                    "https://res.viayoo.com/v1/via-release-cn.apk" || {
+                yellow "APKMirror 下载 Via 失败，尝试 APKPure、Aptoide 与官方 CDN 镜像..." \
+                    "APKMirror Via download failed; trying APKPure, Aptoide, and official CDN mirrors..."
+                local via_mirrors=("https://d.apkpure.com/b/APK/mark.via.gp?version=latest")
+                local via_aptoide_url=""
+                via_aptoide_url="$(_port::resolve_aptoide_apk_url "mark.via.gp" "TRUSTED" 2>/dev/null || true)"
+                [[ -n "${via_aptoide_url}" ]] && via_mirrors+=("${via_aptoide_url}")
+                via_mirrors+=(
+                    "https://res.viayoo.com/v1/via-release.apk"
+                    "https://res.viayoo.com/v1/via-release-cn.apk"
+                )
+                _port::download_apk_from_mirrors "${via_apk}" 500000 "${via_mirrors[@]}" || {
                     error "下载 Via 浏览器失败" "Failed to download Via Browser APK"
                     return 1
                 }
@@ -4106,6 +4150,9 @@ _port::install_preinstalled_apps() {
                         phonesky_mirrors+=("https://gitlab.com/MindTheGapps/vendor_gapps/-/raw/${mt_branch}/arm64/proprietary/product/priv-app/Phonesky/Phonesky.apk")
                     done
                     phonesky_mirrors+=("https://d.apkpure.com/b/APK/com.android.vending?version=latest")
+                    local phonesky_aptoide_url=""
+                    phonesky_aptoide_url="$(_port::resolve_aptoide_apk_url "com.android.vending" "TRUSTED" 2>/dev/null || true)"
+                    [[ -n "${phonesky_aptoide_url}" ]] && phonesky_mirrors+=("${phonesky_aptoide_url}")
                     _port::download_apk_from_mirrors "${phonesky_apk}" 5000000 "${phonesky_mirrors[@]}" || {
                         error "下载 Google Play 商店 (Phonesky.apk) 失败" "Failed to download Google Play Store (Phonesky.apk)"
                         return 1

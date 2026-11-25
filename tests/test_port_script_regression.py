@@ -675,6 +675,69 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             self.assertIn('https://d.apkpure.com/b/APK/mark.via.gp?version=latest', urls)
             self.assertIn('https://d.apkpure.com/b/APK/com.android.vending?version=latest', urls)
 
+    def test_install_preinstalled_apps_falls_back_to_aptoide_when_apkpure_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = root / 'build' / 'portrom' / 'images'
+            (port / 'product').mkdir(parents=True, exist_ok=True)
+
+            valid_apk = root / 'valid.apk'
+            with zipfile.ZipFile(valid_apk, 'w', compression=zipfile.ZIP_STORED) as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest package="mark.via.gp"/>')
+                zf.writestr('classes.dex', b'x' * 600_000)
+
+            aptoide_json = root / 'aptoide.json'
+            aptoide_json.write_text(
+                '{"nodes":{"meta":{"data":{"package":"mark.via.gp","file":{"malware":{"rank":"TRUSTED"},"path":"https://pool.apk.aptoide.com/appupdater/via-test.apk"}}}}}',
+                encoding='utf-8',
+            )
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                install_via=true
+                install_play_store=false
+                install_kernelsu=false
+                _port::download_apkmirror_apk() {{ return 1; }}
+                curl() {{
+                    local out="" url="" expect_out="" after_dash=false arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            url="$arg"
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        fi
+                    done
+                    printf '%s\n' "$url" >> "{(root / 'urls.log').as_posix()}"
+                    if [[ "$url" == *"ws75.aptoide.com/api/7/app/get/package_name=mark.via.gp"* ]]; then
+                        cp -f "{aptoide_json.as_posix()}" "$out"
+                        return 0
+                    fi
+                    if [[ "$url" == "https://pool.apk.aptoide.com/appupdater/via-test.apk" ]]; then
+                        cp -f "{valid_apk.as_posix()}" "$out"
+                        return 0
+                    fi
+                    return 22
+                }}
+                _port::install_preinstalled_apps || exit 94
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue((port / 'product' / 'app' / 'Via' / 'Via.apk').is_file())
+            urls = (root / 'urls.log').read_text(encoding='utf-8').splitlines()
+            self.assertIn('https://pool.apk.aptoide.com/appupdater/via-test.apk', urls)
+
     def test_write_ota_metadata_normalizes_rmx3300_and_respects_override(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
