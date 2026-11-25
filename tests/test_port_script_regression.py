@@ -785,6 +785,23 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
     def test_stock_ota_super_classification_includes_dlkm_partitions(self):
         text = PORT_SH.read_text(encoding='utf-8')
         self.assertIn('[[ "$partname" == "odm_dlkm" || "$partname" == "vendor_dlkm" || "$partname" == "system_dlkm" ]]', text)
+        self.assertNotIn('if [ ! -d build/portrom/images/system_dlkm ];then', text)
+
+    def test_extract_portrom_part_skips_absent_optional_dlkm_partitions(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'build' / 'portrom' / 'images').mkdir(parents=True, exist_ok=True)
+            (root / 'build' / 'baserom' / 'images').mkdir(parents=True, exist_ok=True)
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                for part in system_dlkm vendor_dlkm odm_dlkm my_preload my_company; do
+                    _port::extract_portrom_part "${{part}}" || exit 1
+                done
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
 
 if __name__ == '__main__':

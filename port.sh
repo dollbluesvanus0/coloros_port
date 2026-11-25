@@ -660,9 +660,7 @@ port_run_jobs "${_extract_jobs}" "${work_dir}/build/logs/extract-base" _port::ex
     exit 1
 }
 
-if [ ! -d build/portrom/images/system_dlkm ];then
-        super_list="system system_ext vendor product my_product odm my_engineering my_stock my_heytap my_carrier my_region my_bigball my_manifest my_company my_preload"
-fi
+# Keep vendor_dlkm/system_dlkm in super_list when unpacked; port_pack_images skips absent dirs.
 # Extract the partitions list that need to pack into the super.img
 #super_list=$(sed '/^#/d;/^\//d;/overlay/d;/^$/d;/\^loop/d' build/portrom/images/vendor/etc/fstab.qcom \
 #                | awk '{ print $1}' | sort | uniq)

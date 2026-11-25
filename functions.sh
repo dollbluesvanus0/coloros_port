@@ -831,7 +831,7 @@ _port::extract_portrom_part() {
     fi
     if [[ ! -d "${port_images}/${part}" || ! -f "${port_images}/${part}/.unpacked.done" ]]; then
         if [[ ! -s "${port_images}/${part}.img" ]]; then
-            if [[ "${part}" == my_preload || "${part}" == my_company ]]; then
+            if [[ "${part}" == my_preload || "${part}" == my_company || "${part}" == system_dlkm || "${part}" == vendor_dlkm || "${part}" == odm_dlkm ]]; then
                 blue "移植包未提供可选分区 [${part}]，留给打包阶段处理" "Optional partition [${part}] absent; packing stage will handle it"
                 return 0
             fi
