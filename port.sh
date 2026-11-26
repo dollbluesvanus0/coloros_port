@@ -153,6 +153,17 @@ remove_data_encryption="$(port_config_get remove_data_encryption false)"
 enable_ksu="$(port_config_get enable_ksu false)"
 ksu_repo_owner="$(port_config_get ksu_repo_owner tiann)"
 ksu_repo_name="$(port_config_get ksu_repo_name KernelSU)"
+ksu_manager_run_id="$(port_config_get ksu_manager_run_id 44884831714)"
+install_via="$(_port::lower "$(port_config_get install_via true)")"
+install_play_store="$(_port::lower "$(port_config_get install_play_store true)")"
+install_kernelsu="$(_port::lower "$(port_config_get install_kernelsu true)")"
+for _app_flag_name in install_via install_play_store install_kernelsu; do
+    _app_flag_val="${!_app_flag_name}"
+    if [[ "${_app_flag_val}" != true && "${_app_flag_val}" != false ]]; then
+        error "${_app_flag_name} 必须为 true 或 false" "${_app_flag_name} must be true or false"
+        exit 2
+    fi
+done
 if [[ "${repackext4}" == true ]]; then
     pack_type=EXT
 elif [[ "${repackext4}" == false ]]; then
@@ -650,9 +661,7 @@ port_run_jobs "${_extract_jobs}" "${work_dir}/build/logs/extract-base" _port::ex
     exit 1
 }
 
-if [ ! -d build/portrom/images/system_dlkm ];then
-        super_list="system system_ext vendor product my_product odm my_engineering my_stock my_heytap my_carrier my_region my_bigball my_manifest my_company my_preload"
-fi
+# Keep vendor_dlkm/system_dlkm in super_list when unpacked; port_pack_images skips absent dirs.
 # Extract the partitions list that need to pack into the super.img
 #super_list=$(sed '/^#/d;/^\//d;/overlay/d;/^$/d;/\^loop/d' build/portrom/images/vendor/etc/fstab.qcom \
 #                | awk '{ print $1}' | sort | uniq)
@@ -1488,6 +1497,11 @@ EOF
         printf 'comment ro.lcd.display.screen\ncomment ro.display.brightness\ncomment ro.oplus.lcd.display\n'
     fi
     printf 'ro.oplus.game.camera.support_1_0=true\nro.oplus.audio.quiet_start=true\n'
+    printf 'debug.sf.oplus_display_trace.enable=0\n'
+    printf 'debug.oplus.systrace_enhance=false\n'
+    printf 'ro.audio.voiplog.on=false\n'
+    printf 'persist.device_config.runtime_native_boot.iorap_perfetto_enable=false\n'
+    printf 'ro.oplus.osense.uaf_vip_binder_enable=true\n'
     if [[ "$portIsOOS" == "true" ]]; then
         printf 'comment-force ro.oplus.camera.quickshare.support\n'
     fi
@@ -1535,6 +1549,11 @@ if [[ ${_prop_batch_v2_rc} -eq 127 ]]; then
 
     add_prop_v2 "ro.oplus.game.camera.support_1_0" "true"
     add_prop_v2 "ro.oplus.audio.quiet_start" "true"
+    add_prop_v2 "debug.sf.oplus_display_trace.enable" "0"
+    add_prop_v2 "debug.oplus.systrace_enhance" "false"
+    add_prop_v2 "ro.audio.voiplog.on" "false"
+    add_prop_v2 "persist.device_config.runtime_native_boot.iorap_perfetto_enable" "false"
+    add_prop_v2 "ro.oplus.osense.uaf_vip_binder_enable" "true"
     if [[ $portIsOOS == "true" ]];then
         remove_prop_v2 "ro.oplus.camera.quickshare.support" force
     fi
@@ -1559,7 +1578,7 @@ mkdir -p tmp/etc/permissions tmp/etc/extension
 cp -f build/portrom/images/my_product/etc/permissions/*.xml tmp/etc/permissions/
 cp -f build/portrom/images/my_product/etc/extension/*.xml tmp/etc/extension/
 cp -rf build/baserom/images/my_product/etc/permissions/*.xml build/portrom/images/my_product/etc/permissions/
-find tmp/etc/permissions/ -type f \( -name "multimedia*.xml" -o -name "*permissions*.xml" -o -name "*google*.xml"  -o -name "*configs*.xml" -o -name "*gsm*.xml" -o -name "feature_activity_preload.xml" -o -name "*gemini*.xml" -o -name "*gms*.xml" \) -exec cp -f {} build/portrom/images/my_product/etc/permissions/ \;
+find tmp/etc/permissions/ -type f \( -name "multimedia*.xml" -o -name "*permissions*.xml" -o -name "*google*.xml" -o -name "*configs*.xml" -o -name "*gsm*.xml" -o -name "feature_activity_preload.xml" -o -name "*gemini*.xml" -o -name "*gms*.xml" -o -name "*camera*.xml" \) -exec cp -f {} build/portrom/images/my_product/etc/permissions/ \;
 
 
 if [[ $regionmark != "CN" ]];then
@@ -2001,23 +2020,14 @@ cp -rf  build/baserom/images/my_product/vendor/etc/* build/portrom/images/my_pro
             rm -rf $target_scanner_app/*
             cp -rf $base_scanner_app $target_scanner_app
         fi
+    else
+        _port::restore_stock_oplus_camera || exit 1
     fi
 else
     add_prop_v2 "ro.vendor.oplus.camera.isSupportExplorer" "1"
-    base_oplus_camera_dir=$(find build/baserom/images/my_product -type d -name "OplusCamera")
-    port_oplus_camera_dir=$(find build/portrom/images/my_product -type d -name "OplusCamera")
-
-    if [[ -d "${base_oplus_camera_dir}" ]];then
-        # Debloat removes the donor camera; restore the device's base camera.
-        port_oplus_camera_dir="build/portrom/images/my_product/app/OplusCamera"
-        mkdir -p "${port_oplus_camera_dir}" build/portrom/images/my_product/product_overlay/framework
-        rm -rf "$port_oplus_camera_dir"/*
-        cp -rf "$base_oplus_camera_dir"/* "$port_oplus_camera_dir"/
-        if [[ -d build/baserom/images/my_product/product_overlay/framework ]]; then
-            cp -rf build/baserom/images/my_product/product_overlay/framework/* build/portrom/images/my_product/product_overlay/framework/
-        fi
-    fi
- fi
+    _port::restore_stock_oplus_camera || exit 1
+fi
+ensure_oplus_camera_unit_sdk_permission || exit 1
 
 if [[ ${base_device_family} == "OPSM8250" ]]; then
   camera_optimize_file=$(find build/portrom/images/ -type f -name "sys_camera_optimize_config.xml")
@@ -2121,22 +2131,42 @@ add_feature "oplus.software.display.reduce_brightness_rm_manual" build/portrom/i
 add_feature "oplus.software.display.brightness_memory_rm" build/portrom/images/my_product/etc/permissions/oplus.product.feature_multimedia_unique.xml
 add_feature "oplus.software.display.sec_max_brightness_rm" build/portrom/images/my_product/etc/permissions/oplus.product.feature_multimedia_unique.xml
 
-{
-    echo "# 新增属性"
-    echo "persist.lowbrightnessthreshold=0"
-    echo "persist.sys.renderengine.maxLuminance=500"
-
-    echo "ro.oplus.display.peak.brightness.duration_time=15"
-    echo "ro.oplus.display.peak.brightness.effect_interval_time=1800000"
-    echo "ro.oplus.display.peak.brightness.effect_times_every_day=2"
-    echo "ro.display.brightness.thread.priority=true"
-    echo "# 扬声器清理"
-    echo "ro.oplus.audio.speaker_clean=true"
-    echo "ro.vendor.oplus.radio.use_nitz_name=true"
-    # Fixeme A16 crash with AndroidRuntime: 	at com.android.server.display.feature.panel.OplusFeatureDCBacklight.applyApolloDCMode(OplusFeatureDCBacklight.java:300)
-    #echo "persist.brightness.apollo=1"
-
-} >> build/portrom/images/my_product/etc/bruce/build.prop
+_display_props_batch() {
+    cat <<'EOF'
+persist.lowbrightnessthreshold=0
+persist.sys.renderengine.maxLuminance=500
+ro.oplus.display.peak.brightness.duration_time=15
+ro.oplus.display.peak.brightness.effect_interval_time=1800000
+ro.oplus.display.peak.brightness.effect_times_every_day=2
+ro.display.brightness.thread.priority=true
+ro.oplus.audio.speaker_clean=true
+ro.vendor.oplus.radio.use_nitz_name=true
+EOF
+    if [[ $regionmark == "CN" ]]; then
+        printf 'ro.oplus.display.brightness.min_settings.rm=1,1,25,4.0,0\n'
+    fi
+}
+_display_props_batch | run_prop_tool batch \
+    --file build/portrom/images/my_product/build.prop \
+    --bruce-file build/portrom/images/my_product/etc/bruce/build.prop \
+    --base build/baserom/images/my_product/build.prop \
+    --stdin
+_display_props_rc=$?
+if [[ ${_display_props_rc} -eq 127 ]]; then
+    add_prop_v2 "persist.lowbrightnessthreshold" "0"
+    add_prop_v2 "persist.sys.renderengine.maxLuminance" "500"
+    add_prop_v2 "ro.oplus.display.peak.brightness.duration_time" "15"
+    add_prop_v2 "ro.oplus.display.peak.brightness.effect_interval_time" "1800000"
+    add_prop_v2 "ro.oplus.display.peak.brightness.effect_times_every_day" "2"
+    add_prop_v2 "ro.display.brightness.thread.priority" "true"
+    add_prop_v2 "ro.oplus.audio.speaker_clean" "true"
+    add_prop_v2 "ro.vendor.oplus.radio.use_nitz_name" "true"
+    if [[ $regionmark == "CN" ]]; then
+        add_prop_v2 "ro.oplus.display.brightness.min_settings.rm" "1,1,25,4.0,0"
+    fi
+elif [[ ${_display_props_rc} -ne 0 ]]; then
+    exit "${_display_props_rc}"
+fi
 
 if [[ ${base_product_device} == "OnePlus8Pro" ]] ;then 
     if [[ ${port_android_version} -gt 15 ]];then
@@ -2163,10 +2193,6 @@ if [[ ${base_product_device} == "OnePlus8Pro" ]] ;then
 } >> build/portrom/images/my_product/etc/bruce/build.prop
     fi
 fi
-
- if [[ $regionmark == "CN" ]];then
-     echo "ro.oplus.display.brightness.min_settings.rm=1,1,25,4.0,0" >> build/portrom/images/my_product/etc/bruce/build.prop
- fi
 
 
 if [[ -d build/baserom/images/my_product/etc/vibrator ]];then
@@ -2214,7 +2240,7 @@ if ensure_resource_available "devices/common/realme_gesture.zip" && [[ "$port_ve
 fi
 
 
-if [[ "${base_product_device}" == "OnePlus9Pro" ]] ||[[ "${base_product_device}" == "OnePlus9" ]] ||  [[ "${base_product_device}" == "OP4E5D" ]] || [[ "${base_product_device}" == "OP4E3F" ]]; then
+if [[ "${PORT_USE_STOCK_CAMERA:-false}" != "true" ]] && { [[ "${base_product_device}" == "OnePlus9Pro" ]] || [[ "${base_product_device}" == "OnePlus9" ]] || [[ "${base_product_device}" == "OP4E5D" ]] || [[ "${base_product_device}" == "OP4E3F" ]]; }; then
     if [[ "$portIsColorOS" == "true" ]];then
         if [[ $port_android_version == "17" ]];then
             if ensure_resource_available "devices/common/camera6.0-fix_cos.zip"; then
@@ -2490,12 +2516,33 @@ if ! _port::stage_patch_teesim; then
     exit 1
 fi
 
+# Preinstall requested user/system applications (Via Browser, Google Play Store,
+# KernelSU Manager) before filesystem optimizations and metadata generation.
+if ! _port::install_preinstalled_apps; then
+    error "预装应用集成失败" "Preinstalled app integration failed"
+    exit 1
+fi
+
+# Apply runtime VM/I/O/USAP optimizations and camera library permission guards
+# before post-data compatibility and filesystem metadata generation.
+if ! _port::stage_rom_optimizations; then
+    error "ROM 运行时性能优化失败" "ROM runtime optimization stage failed"
+    exit 1
+fi
+
 # Apply the remaining Android 16/17 post-data compatibility fixes from the
 # optimized pipeline while staying inside the remote monolithic flow.  This
 # stage is intentionally placed after device overlays and before fspatch/
 # contextpatch/repack so all generated metadata sees the final file tree.
 if ! _port::stage_postdata_compat; then
     error "Android 16/17 开机后兼容修复失败" "Android 16/17 post-data compatibility fixes failed"
+    exit 1
+fi
+
+# Normalize legacy Apollo PCC coefficients when porting Android 16+ onto an
+# older vendor base so low brightness levels write directly to backlight sysfs.
+if ! _port::patch_apollo_backlight_xml; then
+    error "Apollo 背光映射修复失败" "Apollo backlight XML patch failed"
     exit 1
 fi
 
@@ -2523,6 +2570,14 @@ if ! _port::patch_performance_sepolicy; then
 fi
 if ! _port::patch_display_panel_sepolicy; then
     error "显示面板 SELinux 修复失败" "Display panel SELinux fix failed"
+    exit 1
+fi
+if ! _port::patch_legacy_vendor_sepolicy; then
+    error "旧 vendor SELinux 兼容修复失败" "Legacy vendor SELinux compatibility fix failed"
+    exit 1
+fi
+if ! _port::patch_legacy_init_services; then
+    error "旧 vendor init 服务兼容修复失败" "Legacy vendor init services compatibility fix failed"
     exit 1
 fi
 
@@ -2688,11 +2743,16 @@ if [[ $pack_method == "stock" ]];then
 
     if [[ -d devices/${base_product_device} ]];then
 
-        ksu_bootimg_file=$(find devices/$base_product_device/ -type f -name "*boot_ksu.img")
-        dtbo_file=$(find devices/$base_product_device/ -type f -name "*dtbo_ksu.img")
-        if [ -n "$ksu_bootimg_file" ];then
+        ksu_bootimg_file=$(find devices/$base_product_device/ -type f -name "*boot_ksu.img" -print -quit 2>/dev/null || true)
+        custom_bootimg_file=$(find devices/$base_product_device/ -type f -name "*boot_custom.img" -print -quit 2>/dev/null || true)
+        dtbo_file=$(find devices/$base_product_device/ -type f -name "*dtbo_ksu.img" -print -quit 2>/dev/null || true)
+        dtbo_custom_file=$(find devices/$base_product_device/ -type f -name "*dtbo_custom.img" -print -quit 2>/dev/null || true)
+        if [[ -n "$ksu_bootimg_file" && -f "$ksu_bootimg_file" ]];then
             mv -f "$ksu_bootimg_file" out/target/product/${base_product_device}/IMAGES/boot.img
             [[ -n "$dtbo_file" && -f "$dtbo_file" ]] && mv -f "$dtbo_file" out/target/product/${base_product_device}/IMAGES/dtbo.img
+        elif [[ -n "$custom_bootimg_file" && -f "$custom_bootimg_file" ]];then
+            mv -f "$custom_bootimg_file" out/target/product/${base_product_device}/IMAGES/boot.img
+            [[ -n "$dtbo_custom_file" && -f "$dtbo_custom_file" ]] && mv -f "$dtbo_custom_file" out/target/product/${base_product_device}/IMAGES/dtbo.img
         else
             spoof_bootimg out/target/product/${base_product_device}/IMAGES/boot.img
         fi
@@ -2706,21 +2766,30 @@ if [[ $pack_method == "stock" ]];then
         [[ -f "${part}" ]] || continue
         partname=$(basename "$part" .img)
         echo "$partname" >> "out/target/product/${base_product_device}/META/ab_partitions.txt"
-        if echo "$super_list" | grep -q -w "$partname"; then
+        if echo "$super_list" | grep -q -w "$partname" || \
+           [[ "$partname" == "odm_dlkm" || "$partname" == "vendor_dlkm" || "$partname" == "system_dlkm" ]]; then
             super_list_info+="$partname "
             _map_targets+=("$partname")
         fi
     done < <(printf '%s\n' out/target/product/${base_product_device}/IMAGES/*.img | LC_ALL=C sort)
-    if [[ ${#_map_targets[@]} -gt 0 ]]; then
-        _map_jobs="$(port_cpu_count)"
-        (( _map_jobs > 32 )) && _map_jobs=32
-        PORT_OTA_IMAGES_DIR="${work_dir}/out/target/product/${base_product_device}/IMAGES"
-        export PORT_OTA_IMAGES_DIR
-        blue "并行生成分区 .map 文件 (${_map_jobs} 线程)" "Generating partition .map files in parallel (${_map_jobs} job(s))"
-        port_run_jobs "${_map_jobs}" "${work_dir}/build/logs/map-gen" _port::generate_map_file "${_map_targets[@]}" || {
-            error "生成 .map 文件失败" "Failed to generate partition .map files"
-            exit 1
-        }
+    _ota_maps_ready=false
+    _port::ensure_ota_map_files() {
+        [[ "${_ota_maps_ready}" == true ]] && return 0
+        if [[ ${#_map_targets[@]} -gt 0 ]]; then
+            _map_jobs="$(port_cpu_count)"
+            (( _map_jobs > 32 )) && _map_jobs=32
+            PORT_OTA_IMAGES_DIR="${work_dir}/out/target/product/${base_product_device}/IMAGES"
+            export PORT_OTA_IMAGES_DIR
+            blue "并行生成分区 .map 文件 (${_map_jobs} 线程)" "Generating partition .map files in parallel (${_map_jobs} job(s))"
+            port_run_jobs "${_map_jobs}" "${work_dir}/build/logs/map-gen" _port::generate_map_file "${_map_targets[@]}" || {
+                error "生成 .map 文件失败" "Failed to generate partition .map files"
+                exit 1
+            }
+        fi
+        _ota_maps_ready=true
+    }
+    if [[ "${is_ab_device}" != true || "${ota_engine}" == "delta" || "${ota_engine}" == "stock" ]]; then
+        _port::ensure_ota_map_files
     fi
     rm -rf out/target/product/${base_product_device}/META/dynamic_partitions_info.txt
     let groupSize=superSize-1048576
@@ -2765,8 +2834,11 @@ if [[ $pack_method == "stock" ]];then
 
         if [[ -f devices/${base_product_device}/OTA/bin/updater ]];then
             cp -rf devices/${base_product_device}/OTA/bin/updater out/target/product/${base_product_device}/OTA/bin
-        else
+        elif [[ -f devices/common/non-ab/OTA/updater ]];then
             cp -rf devices/common/non-ab/OTA/updater out/target/product/${base_product_device}/OTA/bin
+        else
+            error "缺少 A-only OTA updater: devices/${base_product_device}/OTA/bin/updater" "Missing A-only OTA updater: devices/${base_product_device}/OTA/bin/updater"
+            exit 1
         fi
         if [[ -d build/baserom/firmware-update ]];then
             cp -rf build/baserom/firmware-update out/target/product/${base_product_device}/
@@ -2775,35 +2847,39 @@ if [[ $pack_method == "stock" ]];then
             for firmware in $(find build/baserom/ -type f \( -name "*.elf" -o -name "*.mdn" -o -name "*.bin" \));do
                 mv -fv -- "${firmware}" "out/target/product/${base_product_device}/firmware-update/"
             done
-            bootimg=$(find build/baserom/ -name "boot.img" -print -quit)
-            dtboimg=$(find build/baserom/images -name "dtbo.img" -print -quit)
-            vbmetaimg=$(find build/baserom/ -name "vbmeta.img" -print -quit)
-            vmbeta_systemimg=$(find build/baserom/ -name "vbmeta_system.img" -print -quit)
-            [[ -n "$bootimg" && -f "$bootimg" ]] && cp -rf -- "$bootimg" "out/target/product/${base_product_device}/IMAGES/"
-            [[ -n "$dtboimg" && -f "$dtboimg" ]] && cp -rf -- "$dtboimg" "out/target/product/${base_product_device}/firmware-update"
-            [[ -n "$vbmetaimg" && -f "$vbmetaimg" ]] && cp -rf -- "$vbmetaimg" "out/target/product/${base_product_device}/firmware-update"
-            [[ -n "$vmbeta_systemimg" && -f "$vmbeta_systemimg" ]] && cp -rf -- "$vmbeta_systemimg" "out/target/product/${base_product_device}/firmware-update"
+            bootimg=$(find build/baserom/ "out/target/product/${base_product_device}/IMAGES" -name "boot.img" -print -quit 2>/dev/null || true)
+            [[ -n "$bootimg" && -f "$bootimg" ]] && cp -rf -- "$bootimg" "out/target/product/${base_product_device}/IMAGES/" 2>/dev/null || true
+            for _fw_extra in dtbo.img vbmeta.img vbmeta_system.img vbmeta_vendor.img; do
+                _fw_src=$(find build/baserom/ "out/target/product/${base_product_device}/IMAGES" -name "${_fw_extra}" -print -quit 2>/dev/null || true)
+                [[ -n "${_fw_src}" && -f "${_fw_src}" ]] && cp -rf -- "${_fw_src}" "out/target/product/${base_product_device}/firmware-update/"
+            done
         fi
 
         if [[ -d build/baserom/storage-fw ]];then
             cp -rf build/baserom/storage-fw out/target/product/${base_product_device}/
-            cp -rf build/baserom/ffu_tool out/target/product/${base_product_device}/storage-fw
-        else
+            [[ -e build/baserom/ffu_tool ]] && cp -rf build/baserom/ffu_tool out/target/product/${base_product_device}/storage-fw
+        elif [[ -e build/baserom/ffu_tool ]];then
             cp -rf build/baserom/ffu_tool out/target/product/${base_product_device}/
-	fi
+        fi
 
         export OUT=$(pwd)/out/target/product/${base_product_device}/
         if [[ -f devices/${base_product_device}/releasetools.py ]];then
             cp -rf devices/${base_product_device}/releasetools.py out/target/product/${base_product_device}/META/
-        else
+        elif [[ -f devices/common/releasetools.py ]];then
             cp -rf devices/common/releasetools.py out/target/product/${base_product_device}/META/
+        else
+            error "缺少 A-only releasetools.py: devices/${base_product_device}/releasetools.py" "Missing A-only releasetools.py: devices/${base_product_device}/releasetools.py"
+            exit 1
         fi
 
         mkdir -p out/target/product/${base_product_device}/RECOVERY/RAMDISK/etc/
         if [[ -f devices/${base_product_device}/recovery.fstab ]];then
             cp -rf devices/${base_product_device}/recovery.fstab out/target/product/${base_product_device}/RECOVERY/RAMDISK/etc/
-        else
+        elif [[ -f devices/common/recovery.fstab ]];then
             cp -rf devices/common/recovery.fstab out/target/product/${base_product_device}/RECOVERY/RAMDISK/etc/
+        else
+            error "缺少 A-only recovery.fstab: devices/${base_product_device}/recovery.fstab" "Missing A-only recovery.fstab: devices/${base_product_device}/recovery.fstab"
+            exit 1
         fi
     fi
     prop_dirs=(system product system_ext vendor my_manifest)
@@ -2843,6 +2919,7 @@ if [[ $pack_method == "stock" ]];then
                 _ota_built=true
                 ;;
             delta)
+                _port::ensure_ota_map_files
                 _port::build_ab_ota_delta "${_ota_target_files}" "${_ota_out_zip}" || {
                     error "delta_generator 不可用或生成 OTA 失败" "delta_generator unavailable or OTA generation failed"
                     exit 1
@@ -2852,16 +2929,20 @@ if [[ $pack_method == "stock" ]];then
             auto)
                 if type _port::build_ab_ota_rust >/dev/null 2>&1 && _port::build_ab_ota_rust "${_ota_target_files}" "${_ota_out_zip}"; then
                     _ota_built=true
-                elif _port::build_ab_ota_delta "${_ota_target_files}" "${_ota_out_zip}"; then
-                    _ota_built=true
                 else
-                    yellow "快速 A/B OTA 路径不可用，回退到 ota_from_target_files" "Fast A/B OTA path unavailable; falling back to ota_from_target_files"
+                    _port::ensure_ota_map_files
+                    if _port::build_ab_ota_delta "${_ota_target_files}" "${_ota_out_zip}"; then
+                        _ota_built=true
+                    else
+                        yellow "快速 A/B OTA 路径不可用，回退到 ota_from_target_files" "Fast A/B OTA path unavailable; falling back to ota_from_target_files"
+                    fi
                 fi
                 ;;
             stock) ;;
         esac
     fi
     if [[ "${_ota_built}" != true ]]; then
+        _port::ensure_ota_map_files
         pushd otatools || exit 1
         export PATH=$(pwd)/bin/:$PATH
         ./bin/ota_from_target_files --partial= --force_minor_version 9 "${_ota_target_files}/" "${_ota_out_zip}" || exit 1
@@ -2939,9 +3020,10 @@ else
         cp -rf bin/flash/update-binary out/${os_type}_${rom_version}/META-INF/com/google/android/
     fi
     if [[ $is_ab_device = "false" ]];then
-        mv -f build/baserom/firmware-update/*.img out/${os_type}_${rom_version}/firmware-update
+        mv -f build/baserom/firmware-update/*.img out/${os_type}_${rom_version}/firmware-update 2>/dev/null || true
+        rm -rf out/${os_type}_${rom_version}/firmware-update/*reserve* out/${os_type}_${rom_version}/firmware-update/*_dlkm.img
         for fwimg in $(ls out/${os_type}_${rom_version}/firmware-update |cut -d "." -f 1 |grep -vE "super|cust|preloader");do
-            if [[ $fwimg == *"xbl"* ]] || [[ $fwimg == *"dtbo"* ]] ;then
+            if [[ $fwimg == *"xbl"* ]] || [[ $fwimg == *"dtbo"* ]] || [[ $fwimg == *"reserve"* ]] || [[ $fwimg == "boot" ]] || [[ $fwimg == boot_* ]] || [[ $fwimg == init_boot-* ]] || [[ $fwimg == *_dlkm ]];then
                 # Warning: If wrong xbl img has been flashed, it will cause phone hard brick, so we just skip it with fastboot mode.
                 continue
 
@@ -2958,38 +3040,73 @@ else
             elif [[ ${fwimg} == "static_nvbk" ]];then
                 part="static_nvbk"
             else
-                part=${fwimg}                
+                part=${fwimg}
             fi
 
-            sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe flash "${part}" firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
-            sed -i "/# firmware/a fastboot flash "${part}" firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+            if [[ "${fwimg}" == *vbmeta* ]];then
+                sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* --disable-verity --disable-verification flash ${part} firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                sed -i "/# firmware/a fb --disable-verity --disable-verification flash ${part} firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+            else
+                case "${part}" in
+                    abl|aop|aop_config|cpucp|devcfg|engineering_cdt|featenabler|hyp|imagefv|keymaster|oplus_sec|oplusstanvbk|qupfw|shrm|splash|tz|uefi|uefisecapp)
+                        sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${part} firmware-update/${fwimg}.img || echo [WARN] Skipped ${part}" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/# firmware/a fb flash ${part} firmware-update/${fwimg}.img || echo \"[WARN] Skipped ${part}\"" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                        ;;
+                    *)
+                        sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${part} firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/# firmware/a fb flash ${part} firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                        ;;
+                esac
+            fi
         done
-        sed -i "/_b/d" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/_a//g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "/_b/d" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i "s/_a//g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+        for _installer_file in \
+            "out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary" \
+            "out/${os_type}_${rom_version}/mac_linux_flash_script.sh" \
+            "out/${os_type}_${rom_version}/windows_flash_script.bat"
+        do
+            # Match only _a/_b slot suffixes so partition names like vendor_boot and init_boot are preserved.
+            sed -i -E '/_b([[:space:]"'\'']|$)/d' "${_installer_file}"
+            sed -i -E 's/_a([[:space:]"'\'']|$)/\1/g' "${_installer_file}"
+        done
+        sed -i '/# SET_ACTION_SLOT_A_BEGIN/,/# SET_ACTION_SLOT_A_END/d' out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
         sed -i '/^REM SET_ACTION_SLOT_A_BEGIN/,/^REM SET_ACTION_SLOT_A_END/d' out/${os_type}_${rom_version}/windows_flash_script.bat
         sed -i '/# SET_ACTION_SLOT_A_BEGIN/,/# SET_ACTION_SLOT_A_END/d' out/${os_type}_${rom_version}/mac_linux_flash_script.sh
     else
+        if [[ -f build/baserom/images/init_boot-kernelsu.img ]];then
+            mv -f build/baserom/images/init_boot-kernelsu.img build/baserom/images/init_boot.img
+        fi
         mv -f build/baserom/images/*.img out/${os_type}_${rom_version}/firmware-update
+        rm -rf out/${os_type}_${rom_version}/firmware-update/*reserve* out/${os_type}_${rom_version}/firmware-update/*_dlkm.img
+        if [[ -f build/portrom/images/abl.img && ! -f out/${os_type}_${rom_version}/firmware-update/abl.img ]];then
+            cp -f build/portrom/images/abl.img out/${os_type}_${rom_version}/firmware-update/abl.img
+        fi
         for fwimg in $(ls out/${os_type}_${rom_version}/firmware-update |cut -d "." -f 1 |grep -vE "super|cust|preloader");do
-            if [[ $fwimg == *"xbl"* ]] || [[ $fwimg == *"dtbo"* ]] || [[ $fwimg == *"reserve"* ]] || [[ $fwimg == *"boot"* ]];then
-                rm -rf out/${os_type}_${rom_version}/firmware-update/*reserve*
-                # Warning: If wrong xbl img has been flashed, it will cause phone hard brick, so we just skip it with fastboot mode.
+            if [[ $fwimg == *"xbl"* ]] || [[ $fwimg == *"dtbo"* ]] || [[ $fwimg == *"reserve"* ]] || [[ $fwimg == "boot" ]] || [[ $fwimg == boot_* ]] || [[ $fwimg == init_boot-* ]] || [[ $fwimg == *_dlkm ]];then
+                # Skip xbl/dtbo/boot (handled explicitly) and dynamic *_dlkm (inside super.img).
                 continue
             elif [[ $fwimg == "mdm_oem_stanvbk" ]] || [[ $fwimg == "spunvm" ]] ;then
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe flash "${fwimg}" firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
-                sed -i "/\# firmware/a fastboot flash "${fwimg}" firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${fwimg} firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                sed -i "/# firmware/a fb flash ${fwimg} firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
             elif [ "$(echo ${fwimg} |grep vbmeta)" != "" ];then
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe --disable-verity --disable-verification flash "${fwimg}"_b firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe --disable-verity --disable-verification flash "${fwimg}"_a firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
-                sed -i "/\# firmware/a fastboot --disable-verity --disable-verification flash "${fwimg}"_b firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-                sed -i "/\# firmware/a fastboot --disable-verity --disable-verification flash "${fwimg}"_a firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* --disable-verity --disable-verification flash ${fwimg}_b firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* --disable-verity --disable-verification flash ${fwimg}_a firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                sed -i "/# firmware/a fb --disable-verity --disable-verification flash ${fwimg}_b firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                sed -i "/# firmware/a fb --disable-verity --disable-verification flash ${fwimg}_a firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
             else
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe flash "${fwimg}"_b firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
-                sed -i "/REM firmware/a \\\bin\\\windows\\\fastboot.exe flash "${fwimg}"_a firmware-update\/"${fwimg}".img || exit /B 1" out/${os_type}_${rom_version}/windows_flash_script.bat
-                sed -i "/\# firmware/a fastboot flash "${fwimg}"_b firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-                sed -i "/\# firmware/a fastboot flash "${fwimg}"_a firmware-update\/"${fwimg}".img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                case "${fwimg}" in
+                    abl|aop|aop_config|cpucp|devcfg|engineering_cdt|featenabler|hyp|imagefv|keymaster|oplus_sec|oplusstanvbk|qupfw|shrm|splash|tz|uefi|uefisecapp)
+                        sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${fwimg}_b firmware-update/${fwimg}.img || echo [WARN] Skipped ${fwimg}_b" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${fwimg}_a firmware-update/${fwimg}.img || echo [WARN] Skipped ${fwimg}_a" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/# firmware/a fb flash ${fwimg}_b firmware-update/${fwimg}.img || echo \"[WARN] Skipped ${fwimg}_b\"" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                        sed -i "/# firmware/a fb flash ${fwimg}_a firmware-update/${fwimg}.img || echo \"[WARN] Skipped ${fwimg}_a\"" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                        ;;
+                    *)
+                        sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${fwimg}_b firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/REM firmware/a bin\\\\windows\\\\fastboot.exe %* flash ${fwimg}_a firmware-update/${fwimg}.img || ( pause & exit /B 1 )" out/${os_type}_${rom_version}/windows_flash_script.bat
+                        sed -i "/# firmware/a fb flash ${fwimg}_b firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                        sed -i "/# firmware/a fb flash ${fwimg}_a firmware-update/${fwimg}.img || exit 1" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+                        ;;
+                esac
             fi
         done
     fi
@@ -3005,8 +3122,6 @@ else
     sed -i "s/andVersion/${port_android_version}/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
     sed -i "s/PROJECT_CODE/${base_device_code}/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
 
-    unix2dos out/${os_type}_${rom_version}/windows_flash_script.bat
-
     #disable vbmeta
     _out_vbmeta_imgs=()
     while IFS= read -r -d '' img; do
@@ -3014,8 +3129,8 @@ else
         _out_vbmeta_imgs+=("${img}")
     done < <(find "out/${os_type}_${rom_version}/" -type f -name "vbmeta*.img" -print0)
     if [[ ${#_out_vbmeta_imgs[@]} -gt 0 ]]; then
-        run_rom_ops patch-vbmeta "${_out_vbmeta_imgs[@]}"
-        _out_vbmeta_rc=$?
+        _out_vbmeta_rc=0
+        run_rom_ops patch-vbmeta "${_out_vbmeta_imgs[@]}" || _out_vbmeta_rc=$?
         if [[ ${_out_vbmeta_rc} -eq 127 ]]; then
             for img in "${_out_vbmeta_imgs[@]}"; do
                 python3 bin/patch-vbmeta.py "${img}"
@@ -3025,53 +3140,54 @@ else
         fi
     fi
 
-    ksu_bootimg_file=$(find devices/$base_product_device/ -type f -name "*boot_ksu.img")
-    nonksu_bootimg_file=$(find devices/$base_product_device/ -type f -name "*boot_noksu.img")
-    custom_bootimg_file=$(find devices/$base_product_device/ -type f -name "*boot_custom.img")
+    ksu_bootimg_file=$(find "devices/$base_product_device/" -type f -name "*boot_ksu.img" -print -quit 2>/dev/null || true)
+    nonksu_bootimg_file=$(find "devices/$base_product_device/" -type f -name "*boot_noksu.img" -print -quit 2>/dev/null || true)
+    custom_bootimg_file=$(find "devices/$base_product_device/" -type f -name "*boot_custom.img" -print -quit 2>/dev/null || true)
 
-    if [[ -f $nonksu_bootimg_file ]];then
+    if [[ -n "$nonksu_bootimg_file" && -f "$nonksu_bootimg_file" ]];then
         nonksubootimg=$(basename "$nonksu_bootimg_file")
-        mv -f "$nonksu_bootimg_file" out/${os_type}_${rom_version}/
-        [[ -f "devices/$base_product_device/dtbo_noksu.img" ]] && \
-            mv -f "devices/$base_product_device/dtbo_noksu.img" "out/${os_type}_${rom_version}/firmware-update/dtbo_noksu.img"
+        mv -f "$nonksu_bootimg_file" "out/${os_type}_${rom_version}/"
+        rm -f "out/${os_type}_${rom_version}/firmware-update/boot.img"
         sed -i "s/boot_official.img/$nonksubootimg/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
         sed -i "s/boot_official.img/$nonksubootimg/g" out/${os_type}_${rom_version}/windows_flash_script.bat
         sed -i "s/boot_official.img/$nonksubootimg/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i "s/dtbo.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/dtbo.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/windows_flash_script.bat
-        sed -i "s/dtbo.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i '/^REM OFFICAL_BOOT_START/,/^REM OFFICAL_BOOT_END/d' out/${os_type}_${rom_version}/windows_flash_script.bat
+        if [[ -f "devices/$base_product_device/dtbo_noksu.img" ]]; then
+            mv -f "devices/$base_product_device/dtbo_noksu.img" "out/${os_type}_${rom_version}/firmware-update/dtbo_noksu.img"
+            sed -i "s/dtbo\.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
+            sed -i "s/dtbo\.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/windows_flash_script.bat
+            sed -i "s/dtbo\.img/dtbo_noksu.img/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+        fi
     else
-        bootimg=$(find build/baserom/ out/${os_type}_${rom_version} -name "boot.img")
-        mv -f $bootimg out/${os_type}_${rom_version}/boot_official.img
+        bootimg=$(find build/baserom/ "out/${os_type}_${rom_version}" -name "boot.img" -print -quit 2>/dev/null || true)
+        if [[ -n "$bootimg" && -f "$bootimg" ]]; then
+            mv -f "$bootimg" "out/${os_type}_${rom_version}/boot_official.img"
+        fi
     fi
 
-    if [[ -f "$ksu_bootimg_file" ]];then
+    if [[ -n "$ksu_bootimg_file" && -f "$ksu_bootimg_file" ]];then
         ksubootimg=$(basename "$ksu_bootimg_file")
-        mv -f "$ksu_bootimg_file" out/${os_type}_${rom_version}/
-        [[ -f "devices/$base_product_device/dtbo_ksu.img" ]] && \
+        mv -f "$ksu_bootimg_file" "out/${os_type}_${rom_version}/"
+        if [[ -f "devices/$base_product_device/dtbo_ksu.img" ]]; then
             mv -f "devices/$base_product_device/dtbo_ksu.img" "out/${os_type}_${rom_version}/firmware-update/dtbo_ksu.img"
-        sed -i "s/boot_tv.img/$ksubootimg/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/boot_tv.img/$ksubootimg/g" out/${os_type}_${rom_version}/windows_flash_script.bat
-        sed -i "s/boot_tv.img/$ksubootimg/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i "s/dtbo_tv.img/dtbo_ksu.img/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/dtbo_tv.img/dtbo_ksu.img/g" out/${os_type}_${rom_version}/windows_flash_script.bat
-        sed -i "s/dtbo_tv.img/dtbo_ksu.img/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i '/^REM OFFICAL_BOOT_START/,/^REM OFFICAL_BOOT_END/d' out/${os_type}_${rom_version}/windows_flash_script.bat
-        
-    elif [[ -f "$custom_bootimg_file" ]];then
+        fi
+        sed -i "s/boot_ksu.img/$ksubootimg/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
+        sed -i "s/boot_ksu.img/$ksubootimg/g" out/${os_type}_${rom_version}/windows_flash_script.bat
+        sed -i "s/boot_ksu.img/$ksubootimg/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+    elif [[ -n "$custom_bootimg_file" && -f "$custom_bootimg_file" ]];then
         custombootimg=$(basename "$custom_bootimg_file")
-        mv -f "$custom_bootimg_file" out/${os_type}_${rom_version}/
-        [[ -f "devices/$base_product_device/dtbo_custom.img" ]] && \
+        mv -f "$custom_bootimg_file" "out/${os_type}_${rom_version}/"
+        sed -i "s/boot_ksu.img/$custombootimg/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
+        sed -i "s/boot_ksu.img/$custombootimg/g" out/${os_type}_${rom_version}/windows_flash_script.bat
+        sed -i "s/boot_ksu.img/$custombootimg/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+        if [[ -f "devices/$base_product_device/dtbo_custom.img" ]]; then
             mv -f "devices/$base_product_device/dtbo_custom.img" "out/${os_type}_${rom_version}/firmware-update/dtbo_custom.img"
-        sed -i "s/boot_tv.img/$custombootimg/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/boot_tv.img/$custombootimg/g" out/${os_type}_${rom_version}/windows_flash_script.bat
-        sed -i "s/boot_tv.img/$custombootimg/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        sed -i "s/dtbo_tv.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
-        sed -i "s/dtbo_tv.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/windows_flash_script.bat
-        sed -i "s/dtbo_tv.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
-        
+            sed -i "s/dtbo_ksu.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/META-INF/com/google/android/update-binary
+            sed -i "s/dtbo_ksu.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/windows_flash_script.bat
+            sed -i "s/dtbo_ksu.img/dtbo_custom.img/g" out/${os_type}_${rom_version}/mac_linux_flash_script.sh
+        fi
     fi
+
+    unix2dos out/${os_type}_${rom_version}/windows_flash_script.bat
 
     if [[ "${PORT_LOW_DISK:-false}" == true ]]; then
         # Firmware and boot images have now been staged into the package.
@@ -3086,8 +3202,8 @@ else
     pack_timestamp=$(date +"%m%d%H%M")
     hash="$(port_sha256_file "out/${os_type}_${rom_version}.zip")" || exit 1
     hash="${hash:0:10}"
-    if [[ $pack_type == "EROFS" ]] && [[ -f out/${os_type}_${rom_version}/$ksubootimg ]];then
-        pack_type="ROOT_"${pack_type}
+    if [[ -n "${ksubootimg:-}" && -f "out/${os_type}_${rom_version}/${ksubootimg}" ]];then
+        pack_type="ROOT_${pack_type}"
     fi
     mv out/${os_type}_${rom_version}.zip out/${os_type}_${rom_version}_${hash}_${port_product_model}_${pack_timestamp}_${pack_type}.zip
     green "移植完毕" "Porting completed"    

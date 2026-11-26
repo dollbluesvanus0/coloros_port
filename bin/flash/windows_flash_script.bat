@@ -4,7 +4,7 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 reg query "HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Control\Nls\Language" /v InstallLanguage|find "0804">nul&& set LANG=Chinese
 if "%LANG%"=="Chinese" (
-    TITLE windows Ë¢»ú½Å±¾ [ÇëÎğÑ¡ÖĞ´°¿Ú£¬¿¨×¡°´ÓÒ¼ü»ò»Ø³µ»ò·Å´óËõĞ¡´°¿Ú»Ö¸´]
+    TITLE windows åˆ·æœºè„šæœ¬ [è¯·å‹¿é€‰ä¸­çª—å£ï¼Œå¡ä½æŒ‰å³é”®æˆ–å›è½¦æˆ–æ”¾å¤§ç¼©å°çª—å£æ¢å¤]
 ) else (
     TITLE Windows Flash Script
 )
@@ -12,95 +12,137 @@ color 3f
 echo.
 if exist "super.zst" (
     if "%LANG%"=="Chinese" (
-        echo. ÕıÔÚ½âÑ¹super¾µÏñ,ÄÍĞÄµÈ´ı
+        echo. æ­£åœ¨è§£å‹superé•œåƒ,è€å¿ƒç­‰å¾…
     ) else (
         echo. Extracting the super image, wait patiently
     )
-    bin\windows\zstd.exe --rm -d super.zst -o super.img
-    if not "%errorlevel%" == "0" (
+    if exist "super.img.tmp" del /f /q "super.img.tmp" >nul 2>nul
+    bin\windows\zstd.exe -d super.zst -o super.img.tmp
+    if not "!errorlevel!" == "0" (
+        if exist "super.img.tmp" del /f /q "super.img.tmp" >nul 2>nul
         if "%LANG%"=="Chinese" (
-            echo. ×ª»»Ê§°Ü,°´ÈÎÒâ¼üÍË³ö
+            echo. è½¬æ¢å¤±è´¥,æŒ‰ä»»æ„é”®é€€å‡º
         ) else (
             echo. Conversion failed. Press any key to exit
         )
         pause >nul 2>nul
-        exit
+        exit /B 1
     )
+    move /y "super.img.tmp" "super.img" >nul || ( pause & exit /B 1 )
+    del /f /q "super.zst" >nul 2>nul
 )
 
 if "%LANG%"=="Chinese" (
     echo.
-    echo. 1. ±£ÁôÊı¾İË¢Èë
+    echo. 1. ä¿ç•™æ•°æ®åˆ·å…¥
     echo.
-    echo. 2. Ë«ÇåË¢Èë
+    echo. 2. åŒæ¸…åˆ·å…¥
     echo.
-    set /p input=ÇëÑ¡Ôñ-Ä¬ÈÏÑ¡Ôñ1,»Ø³µÖ´ĞĞ:
+    set "input=1"
+    set /p input=è¯·é€‰æ‹©-é»˜è®¤é€‰æ‹©1,å›è½¦æ‰§è¡Œ:
 ) else (
     echo.
     echo. 1. Preserve user data during flashing
     echo.
     echo. 2. Wiping data
     echo.
+    set "input=1"
     set /p input=Please select - 1 is selected by default, and enter to execute:
 )
+if not "!input!"=="1" if not "!input!"=="2" (
+    echo Invalid selection: !input!
+    pause
+    exit /B 1
+)
 
 if "%LANG%"=="Chinese" (
     echo.
-    echo. »úĞÍÑéÖ¤ÖĞ...ÇëÈ·±£ÄúµÄÉè±¸´úºÅÎªdevice_code£¬²¢ÒÑ¾­½øÈëfastbootdÄ£Ê½ adb reboot fastboot¡£
-
+    echo. æœºå‹éªŒè¯ä¸­...è¯·ç¡®ä¿æ‚¨çš„è®¾å¤‡ä»£å·ä¸ºdevice_codeï¼Œå¹¶è¿›å…¥bootloaderæˆ–fastbootdæ¨¡å¼ã€‚
     echo.
 ) else (
     echo.
-    echo. Validating device...please boot your device into bootloader and make sure your device code is device_code
+    echo. Validating device...please boot your device into bootloader or fastbootd and make sure your device code is device_code
     echo.
 )
 
-:: »ñÈ¡Éè±¸´úÂë
-set "product="
-for /f "tokens=2 delims=: " %%i in ('bin\windows\fastboot.exe %* getvar product 2^>^&1 ^| findstr /r /c:"^product: "') do set "product=%%i"
+set "userspace="
+for /f "tokens=1,* delims=:" %%a in ('bin\windows\fastboot.exe %* getvar is-userspace 2^>^&1 ^| findstr /r /c:"is-userspace:"') do (
+    for /f "tokens=1" %%u in ("%%b") do set "userspace=%%u"
+)
+if /i "!userspace!"=="yes" (
+    if "%LANG%"=="Chinese" (
+        echo. æ£€æµ‹åˆ°fastbootdæ¨¡å¼ï¼Œæ­£åœ¨é‡å¯åˆ°bootloader...
+    ) else (
+        echo. Detected fastbootd mode, rebooting into bootloader...
+    )
+    bin\windows\fastboot.exe %* reboot bootloader || ( pause & exit /B 1 )
+    set /a _fb_tries=0
+    :wait_bootloader_loop
+    ping 127.0.0.1 -n 3 >nul 2>nul
+    set "userspace="
+    for /f "tokens=1,* delims=:" %%a in ('bin\windows\fastboot.exe %* getvar is-userspace 2^>^&1 ^| findstr /r /c:"is-userspace:"') do (
+        for /f "tokens=1" %%u in ("%%b") do set "userspace=%%u"
+    )
+    if /i "!userspace!"=="no" goto :bootloader_ready
+    set /a _fb_tries+=1
+    if !_fb_tries! lss 15 goto :wait_bootloader_loop
+    echo Timed out waiting for bootloader.
+    pause
+    exit /B 1
+)
+:bootloader_ready
 
-:: Ô¤ÆÚÉè±¸´úÂë
+:: è·å–è®¾å¤‡ä»£ç 
+set "product="
+for /f "tokens=1,* delims=:" %%a in ('bin\windows\fastboot.exe %* getvar product 2^>^&1 ^| findstr /r /c:"product:"') do (
+    for /f "tokens=1" %%p in ("%%b") do set "product=%%p"
+)
+
+:: é¢„æœŸè®¾å¤‡ä»£ç 
 set "expected_device=device_code"
 
-:: ÉèÖÃÓïÑÔÏà¹ØµÄÏûÏ¢
+:: è®¾ç½®è¯­è¨€ç›¸å…³çš„æ¶ˆæ¯
 if "%LANG%"=="Chinese" (
-    set "msg_mismatch= Éè±¸device_code²»Æ¥Åä¡£Çë¼ì²éÊÇ·ñÊÇ½øÈëfastbootdÄ£Ê½"
-    set "msg_continue=ÄãÏë¼ÌĞøÂğ£¿(y/n): "
-    set "msg_abort= ²Ù×÷ÒÑ±»ÓÃ»§ÖĞÖ¹¡£"
-    set "msg_continue_process=¼ÌĞø²Ù×÷..."
+    set "msg_mismatch= è®¾å¤‡device_codeä¸åŒ¹é…ã€‚è¯·æ£€æŸ¥è¿æ¥æˆ–è®¾å¤‡ä»£å·"
+    set "msg_abort= æ“ä½œå·²è¢«ç”¨æˆ·ä¸­æ­¢ã€‚"
 ) else (
     set "msg_mismatch=Mismatching image and device."
-    set "msg_continue=Do you want to continue anyway? (y/n): "
     set "msg_abort=Operation aborted by user."
-    set "msg_continue_process=Continuing with the process..."
 )
 
-:: ¼ì²éÊÇ·ñÆ¥Åä
+:: æ£€æŸ¥æ˜¯å¦åŒ¹é…
 if not defined product (
     echo %msg_mismatch%
     echo %msg_abort%
+    pause
     exit /B 1
 )
 if /i "!product!" neq "%expected_device%" (
-    echo %msg_mismatch%
+    echo %msg_mismatch% ^(got "!product!", expected "%expected_device%"^)
     echo %msg_abort%
+    pause
     exit /B 1
 )
 
-if "%LANG%"=="Chinese" (
-    echo.
-    echo. 1. Ë¢ÈëKSUÄÚºË
-    echo.
-    echo. 2. Ë¢Èë¹Ù·½ÄÚºË
-    echo.
-    set /p kernel=ÇëÑ¡Ôñ-Ä¬ÈÏÑ¡Ôñ1,»Ø³µÖ´ĞĞ:
-) else (
-    echo.
-    echo. 1. Flashing KernelSU boot.img
-    echo.
-    echo. 2. Flahsing Official boot.img
-    echo.
-    set /p kernel=Please select - 1 is selected by default, and enter to execute:
+set "kernel=2"
+if exist "%~dp0boot_ksu.img" (
+    if "%LANG%"=="Chinese" (
+        echo.
+        echo. 1. åˆ·å…¥KSUå†…æ ¸
+        echo.
+        echo. 2. åˆ·å…¥å®˜æ–¹å†…æ ¸
+        echo.
+        set "kernel=1"
+        set /p kernel=è¯·é€‰æ‹©-é»˜è®¤é€‰æ‹©1,å›è½¦æ‰§è¡Œ:
+    ) else (
+        echo.
+        echo. 1. Flashing KernelSU boot.img
+        echo.
+        echo. 2. Flashing Official boot.img
+        echo.
+        set "kernel=1"
+        set /p kernel=Please select - 1 is selected by default, and enter to execute:
+    )
 )
 
 set "flash_boot=%~dp0boot_official.img"
@@ -108,77 +150,71 @@ set "flash_dtbo=%~dp0firmware-update\dtbo.img"
 if "%kernel%"=="1" (
     if exist "%~dp0boot_ksu.img" (
         set "flash_boot=%~dp0boot_ksu.img"
-        set "flash_dtbo=%~dp0firmware-update\dtbo_ksu.img"
+        if exist "%~dp0firmware-update\dtbo_ksu.img" set "flash_dtbo=%~dp0firmware-update\dtbo_ksu.img"
     )
 )
 if not exist "%~dp0super.img" (
     echo Required super.img is missing.
+    pause
     exit /B 1
 )
 if not exist "!flash_boot!" (
-    echo Required boot image is missing.
+    echo Required boot image is missing: !flash_boot!
+    pause
     exit /B 1
 )
 if not exist "!flash_dtbo!" (
-    echo Required dtbo image is missing.
+    echo Required dtbo image is missing: !flash_dtbo!
+    pause
     exit /B 1
 )
 if "%kernel%"=="1" (
     if "%LANG%"=="Chinese" (
-        echo. Ë¢ÈëµÚÈı·½boot_ksu.img
+        echo. åˆ·å…¥ç¬¬ä¸‰æ–¹boot_ksu.img
     ) else (
         echo. Flashing custom boot.img
     )
-
-    if exist "%~dp0boot_ksu.img" (
-        bin\windows\fastboot.exe flash boot "%~dp0boot_ksu.img" || exit /B 1
-        bin\windows\fastboot.exe flash dtbo "%~dp0firmware-update/dtbo_ksu.img" || exit /B 1
-    ) else (
-		if "%LANG%"=="Chinese" (
-		echo. boot_ksu.img ²»´æÔÚ£¬Ë¢Èë¹Ù·½boot_official.img
-			) else (
-		echo. boot_ksu.img not exists, Flashing boot_official.img
-			)
-
-        bin\windows\fastboot.exe flash boot "%~dp0boot_official.img" || exit /B 1
-        bin\windows\fastboot.exe flash dtbo "%~dp0firmware-update/dtbo.img" || exit /B 1
-    )
 ) else (
-    bin\windows\fastboot.exe flash boot "%~dp0boot_official.img" || exit /B 1
-    bin\windows\fastboot.exe flash dtbo "%~dp0firmware-update/dtbo.img" || exit /B 1
+    if "%LANG%"=="Chinese" (
+        echo. åˆ·å…¥å®˜æ–¹boot_official.img
+    ) else (
+        echo. Flashing official boot.img
+    )
 )
+bin\windows\fastboot.exe %* flash boot_a "!flash_boot!" || ( pause & exit /B 1 )
+bin\windows\fastboot.exe %* flash boot_b "!flash_boot!" || ( pause & exit /B 1 )
+bin\windows\fastboot.exe %* flash dtbo_a "!flash_dtbo!" || ( pause & exit /B 1 )
+bin\windows\fastboot.exe %* flash dtbo_b "!flash_dtbo!" || ( pause & exit /B 1 )
 
 REM firmware
 
-bin\windows\fastboot.exe erase super || exit /B 1
-bin\windows\fastboot.exe reboot bootloader || exit /B 1
-ping 127.0.0.1 -n 5 >nul 2>nul
-bin\windows\fastboot.exe flash super "%~dp0super.img" || exit /B 1
-if "%input%" == "2" (
-	if "%LANG%"=="Chinese" (
-	    echo. ÕıÔÚË«ÇåÏµÍ³,ÄÍĞÄµÈ´ı
+bin\windows\fastboot.exe %* erase super || ( pause & exit /B 1 )
+bin\windows\fastboot.exe %* flash super "%~dp0super.img" || ( pause & exit /B 1 )
+if "!input!" == "2" (
+    if "%LANG%"=="Chinese" (
+        echo. æ­£åœ¨åŒæ¸…ç³»ç»Ÿ,è€å¿ƒç­‰å¾…
     ) else (
         echo. Wiping data, please wait patiently
     )
-	bin\windows\fastboot.exe erase userdata || exit /B 1
-	bin\windows\fastboot.exe erase metadata || exit /B 1
+    bin\windows\fastboot.exe %* erase userdata || ( pause & exit /B 1 )
+    bin\windows\fastboot.exe %* erase metadata || ( pause & exit /B 1 )
 )
 REM SET_ACTION_SLOT_A_BEGIN
 if "%LANG%"=="Chinese" (
-	echo. ÉèÖÃ»î¶¯·ÖÇøÎª 'a'¡£¿ÉÄÜĞèÒªÒ»Ğ©Ê±¼ä¡£ÇëÎğÊÖ¶¯ÖØĞÂÆô¶¯»ò°ÎµôÊı¾İÏß£¬·ñÔò¿ÉÄÜµ¼ÖÂÉè±¸±ä×©¡£
+    echo. è®¾ç½®æ´»åŠ¨åˆ†åŒºä¸º 'a'ã€‚å¯èƒ½éœ€è¦ä¸€äº›æ—¶é—´ã€‚è¯·å‹¿æ‰‹åŠ¨é‡æ–°å¯åŠ¨æˆ–æ‹”æ‰æ•°æ®çº¿ï¼Œå¦åˆ™å¯èƒ½å¯¼è‡´è®¾å¤‡å˜ç –ã€‚
 ) else (
     echo. Starting the process to set the active slot to 'a.' This may take some time. Please refrain from manually restarting or unplugging the data cable, as doing so could result in the device becoming unresponsive.
 )
-bin\windows\fastboot.exe set_active a || exit /B 1
+bin\windows\fastboot.exe %* set_active a || ( pause & exit /B 1 )
 
 REM SET_ACTION_SLOT_A_END
 
-bin\windows\fastboot.exe reboot || exit /B 1
+bin\windows\fastboot.exe %* reboot || ( pause & exit /B 1 )
 
 if "%LANG%"=="Chinese" (
-    echo. Ë¢»úÍê³É,ÈôÊÖ»ú³¤Ê±¼äÎ´ÖØÆôÇëÊÖ¶¯ÖØÆô,°´ÈÎÒâ¼üÍË³ö
+    echo. åˆ·æœºå®Œæˆ,è‹¥æ‰‹æœºé•¿æ—¶é—´æœªé‡å¯è¯·æ‰‹åŠ¨é‡å¯,æŒ‰ä»»æ„é”®é€€å‡º
 ) else (
     echo. Flash completed. If the phone does not restart for an extended period, please manually restart. Press any key to exit.
 )
 pause
-exit
+exit /B 0

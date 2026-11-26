@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PORT_SH = ROOT / 'port.sh'
@@ -115,7 +116,9 @@ class PortScriptStaticRegressionTests(unittest.TestCase):
             self.assertIn(f'{fn_name}()', self.functions_text)
         self.assertIn('_port::build_ab_ota_rust', self.port_text)
         self.assertIn('_port::build_ab_ota_delta', self.port_text)
+        self.assertIn('_port::ensure_ota_map_files()', self.port_text)
         self.assertIn('PORT_DISABLE_PAYLOAD_GEN', self.functions_text)
+        self.assertNotIn('"--out-file" "${payload_bin}"', self.functions_text)
 
     def test_setup_sh_installs_jq_and_dos2unix_on_all_platforms(self):
         for line_marker in ('x86_64', 'aarch64', 'Darwin'):
@@ -361,6 +364,851 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             '''
         )
         self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_rom_optimization_and_camera_unit_sdk_permission_helpers(self):
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('ensure_oplus_camera_unit_sdk_permission', port_text)
+        self.assertIn('_port::restore_stock_oplus_camera', port_text)
+        self.assertIn('_port::stage_rom_optimizations', port_text)
+        self.assertIn('debug.sf.oplus_display_trace.enable', port_text)
+        self.assertIn('ro.audio.voiplog.on', port_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            img = root / 'build' / 'portrom' / 'images'
+            jar = img / 'my_product' / 'product_overlay' / 'framework' / 'com.oplus.camera.unit.sdk.jar'
+            jar.parent.mkdir(parents=True, exist_ok=True)
+            jar.write_bytes(b'jar')
+            cfg = img / 'config'
+            cfg.mkdir(parents=True, exist_ok=True)
+            (cfg / 'my_product_file_contexts').write_text('', encoding='utf-8')
+            (cfg / 'my_product_fs_config').write_text('', encoding='utf-8')
+            (cfg / 'system_ext_file_contexts').write_text('', encoding='utf-8')
+            (cfg / 'system_ext_fs_config').write_text('', encoding='utf-8')
+            sys_prop = img / 'system' / 'system' / 'build.prop'
+            sys_prop.parent.mkdir(parents=True, exist_ok=True)
+            sys_prop.write_text('dalvik.vm.usap_pool_enabled=false\n', encoding='utf-8')
+            (img / 'system_ext' / 'etc').mkdir(parents=True, exist_ok=True)
+            post_boot = img / 'vendor' / 'bin' / 'init.kernel.post_boot-taro.sh'
+            post_boot.parent.mkdir(parents=True, exist_ok=True)
+            post_boot.write_text(
+                'function configure_read_ahead_kb_values() {\n'
+                '    if [ $MemTotal -le 3145728 ]; then\n'
+                '        ra_kb=128\n'
+                '    else\n'
+                '        ra_kb=512\n'
+                '    fi\n'
+                '}\n',
+                encoding='utf-8',
+            )
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                _port::stage_rom_optimizations || exit 2
+                # Idempotent second pass
+                _port::stage_rom_optimizations || exit 3
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+            cam_xml = (img / 'my_product' / 'etc' / 'permissions' / 'com.oplus.camera.unit.sdk.xml').read_text(encoding='utf-8')
+            self.assertIn('name="com.oplus.camera.unit.sdk"', cam_xml)
+            self.assertIn('/product/framework/com.oplus.camera.unit.sdk.jar', cam_xml)
+            cam_ctx = (cfg / 'my_product_file_contexts').read_text(encoding='utf-8')
+            self.assertEqual(cam_ctx.count('com\\.oplus\\.camera\\.unit\\.sdk\\.xml'), 1)
+
+            self.assertIn('dalvik.vm.usap_pool_enabled=true', sys_prop.read_text(encoding='utf-8'))
+            rc_text = (img / 'system_ext' / 'etc' / 'init' / 'coloros_port_tuning.rc').read_text(encoding='utf-8')
+            self.assertIn('write /proc/sys/vm/swappiness 80', rc_text)
+            self.assertIn('write /sys/block/dm-0/queue/read_ahead_kb 128', rc_text)
+            se_ctx = (cfg / 'system_ext_file_contexts').read_text(encoding='utf-8')
+            self.assertEqual(se_ctx.count('coloros_port_tuning\\.rc'), 1)
+            se_fs = (cfg / 'system_ext_fs_config').read_text(encoding='utf-8')
+            self.assertEqual(se_fs.count('system_ext/etc/init/coloros_port_tuning.rc'), 1)
+
+            pb_text = post_boot.read_text(encoding='utf-8')
+            self.assertNotIn('ra_kb=512', pb_text)
+            self.assertIn('ra_kb=128', pb_text)
+            self.assertEqual(pb_text.count('# coloros_port_io_tuning'), 1)
+
+    def test_restore_stock_oplus_camera_purges_donor_and_restores_stock(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            base = root / 'build' / 'baserom' / 'images'
+            port = root / 'build' / 'portrom' / 'images'
+
+            # Stock OplusCamera in product/app/OplusCamera plus camera cfg & unit SDK jar
+            stock_apk = base / 'product' / 'app' / 'OplusCamera' / 'OplusCamera.apk'
+            stock_apk.parent.mkdir(parents=True, exist_ok=True)
+            stock_apk.write_bytes(b'stock-camera')
+            (base / 'my_product' / 'etc' / 'camera').mkdir(parents=True, exist_ok=True)
+            (base / 'my_product' / 'etc' / 'camera' / 'cfg.xml').write_text('stock-cfg', encoding='utf-8')
+            stock_jar = base / 'my_product' / 'product_overlay' / 'framework' / 'com.oplus.camera.unit.sdk.jar'
+            stock_jar.parent.mkdir(parents=True, exist_ok=True)
+            stock_jar.write_bytes(b'stock-sdk')
+
+            # Donor OplusCamera shadows across multiple partitions + stale donor jar
+            for rel in ('my_product/app/OplusCamera', 'my_stock/priv-app/OplusCamera', 'product/priv-app/OplusCamera'):
+                donor_apk = port / rel / 'OplusCamera.apk'
+                donor_apk.parent.mkdir(parents=True, exist_ok=True)
+                donor_apk.write_bytes(b'donor-camera')
+            stale_jar = port / 'my_product' / 'product_overlay' / 'framework' / 'com.oplus.camera.donor.jar'
+            stale_jar.parent.mkdir(parents=True, exist_ok=True)
+            stale_jar.write_bytes(b'donor-jar')
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                _port::restore_stock_oplus_camera || exit 2
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+            self.assertEqual((port / 'product' / 'app' / 'OplusCamera' / 'OplusCamera.apk').read_bytes(), b'stock-camera')
+            self.assertFalse((port / 'my_product' / 'app' / 'OplusCamera').exists())
+            self.assertFalse((port / 'my_stock' / 'priv-app' / 'OplusCamera').exists())
+            self.assertFalse((port / 'product' / 'priv-app' / 'OplusCamera').exists())
+            self.assertFalse(stale_jar.exists())
+            self.assertEqual((port / 'my_product' / 'product_overlay' / 'framework' / 'com.oplus.camera.unit.sdk.jar').read_bytes(), b'stock-sdk')
+            self.assertEqual((port / 'my_product' / 'etc' / 'camera' / 'cfg.xml').read_text(encoding='utf-8'), 'stock-cfg')
+            self.assertTrue((port / 'my_product' / 'etc' / 'permissions' / 'com.oplus.camera.unit.sdk.xml').exists())
+
+    def test_install_preinstalled_apps_via_phonesky_and_kernelsu(self):
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        config_text = PORT_CONFIG.read_text(encoding='utf-8')
+        self.assertIn('_port::install_preinstalled_apps', port_text)
+        for key in ('install_via=true', 'install_play_store=true', 'install_kernelsu=true'):
+            self.assertIn(key, config_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = root / 'build' / 'portrom' / 'images'
+            (port / 'product').mkdir(parents=True, exist_ok=True)
+            (port / 'my_product' / 'priv-app' / 'GooglePlayServicesUpdater').mkdir(parents=True, exist_ok=True)
+            (port / 'my_product' / 'priv-app' / 'GooglePlayServicesUpdater' / 'GooglePlayServicesUpdater.apk').write_bytes(b'stub')
+            cn_gms = port / 'my_product' / 'etc' / 'permissions' / 'oplus_google_cn_gms_features.xml'
+            cn_gms.parent.mkdir(parents=True, exist_ok=True)
+            cn_gms.write_text(
+                '<permissions>\n'
+                '    <feature name="cn.google.services" />\n'
+                '    <feature name="com.google.android.feature.services_updater" />\n'
+                '</permissions>\n',
+                encoding='utf-8',
+            )
+
+            apps_src = root / 'devices' / 'common' / 'apps'
+            for app, extra in (('Via', None), ('Phonesky', None), ('KernelSU', 'lib/arm64-v8a/libksud.so')):
+                apk_path = apps_src / app / f'{app}.apk'
+                apk_path.parent.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(apk_path, 'w') as zf:
+                    zf.writestr('AndroidManifest.xml', f'<manifest package="{app}"/>')
+                    if extra:
+                        zf.writestr(extra, b'elf-so')
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                _port::install_preinstalled_apps || exit 2
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+            self.assertTrue((port / 'product' / 'app' / 'Via' / 'Via.apk').is_file())
+            self.assertTrue((port / 'product' / 'priv-app' / 'Phonesky' / 'Phonesky.apk').is_file())
+            self.assertFalse((port / 'my_product' / 'priv-app' / 'GooglePlayServicesUpdater').exists())
+            self.assertNotIn('services_updater', cn_gms.read_text(encoding='utf-8'))
+            self.assertIn('cn.google.services', cn_gms.read_text(encoding='utf-8'))
+            priv_xml = port / 'product' / 'etc' / 'permissions' / 'privapp-permissions-phonesky.xml'
+            self.assertTrue(priv_xml.is_file())
+            self.assertIn('com.android.vending', priv_xml.read_text(encoding='utf-8'))
+            self.assertTrue((port / 'product' / 'app' / 'KernelSU' / 'KernelSU.apk').is_file())
+            self.assertEqual((port / 'product' / 'app' / 'KernelSU' / 'lib' / 'arm64' / 'libksud.so').read_bytes(), b'elf-so')
+
+    def test_download_valid_apk_passes_output_flag_before_double_dash(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sample_zip = root / 'sample.apk'
+            with zipfile.ZipFile(sample_zip, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest/>')
+                zf.writestr('pad.bin', b'x' * 70000)
+
+            dest = root / 'out' / 'Via.apk'
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                curl() {{
+                    local out="" after_dash=false expect_out="" arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            [[ "$arg" != "-o" ]] || return 64
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        fi
+                    done
+                    [[ -n "$out" ]] || return 65
+                    cp -f "{sample_zip.as_posix()}" "$out"
+                }}
+                _port::download_valid_apk "https://example.invalid/via.apk" "{dest.as_posix()}" 1024 || exit 2
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue(dest.is_file())
+
+    def test_download_valid_apk_rejects_bundle_zip_and_mirrors_fall_back(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bundle_zip = root / 'bundle.zip'
+            with zipfile.ZipFile(bundle_zip, 'w') as zf:
+                zf.writestr('info.json', '{}')
+                zf.writestr('base.apk', b'x' * 70000)
+
+            valid_apk = root / 'valid.apk'
+            with zipfile.ZipFile(valid_apk, 'w') as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest/>')
+                zf.writestr('classes.dex', b'x' * 70000)
+
+            dest = root / 'out' / 'Via.apk'
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                curl() {{
+                    local out="" url="" expect_out="" after_dash=false arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            url="$arg"
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        fi
+                    done
+                    if [[ "$url" == *"bundle"* ]]; then
+                        cp -f "{bundle_zip.as_posix()}" "$out"
+                    elif [[ "$url" == *"fail"* ]]; then
+                        return 28
+                    else
+                        cp -f "{valid_apk.as_posix()}" "$out"
+                    fi
+                }}
+                if _port::download_valid_apk "https://example.invalid/bundle.xapk" "{dest.as_posix()}" 1024; then
+                    exit 91
+                fi
+                _port::download_apk_from_mirrors "{dest.as_posix()}" 1024 \
+                    "https://example.invalid/fail.apk" \
+                    "https://example.invalid/bundle.xapk" \
+                    "https://example.invalid/good.apk" || exit 92
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue(dest.is_file())
+
+    def test_install_preinstalled_apps_falls_back_when_apkmirror_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = root / 'build' / 'portrom' / 'images'
+            (port / 'product').mkdir(parents=True, exist_ok=True)
+
+            valid_apk = root / 'valid.apk'
+            with zipfile.ZipFile(valid_apk, 'w', compression=zipfile.ZIP_STORED) as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest package="demo.app"/>')
+                zf.writestr('classes.dex', b'x' * 5_100_000)
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                install_via=true
+                install_play_store=true
+                install_kernelsu=false
+                _port::download_apkmirror_apk() {{ return 1; }}
+                curl() {{
+                    local out="" url="" expect_out="" after_dash=false arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            url="$arg"
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        fi
+                    done
+                    printf '%s\n' "$url" >> "{(root / 'urls.log').as_posix()}"
+                    if [[ "$url" == *"d.apkpure.com/b/APK/mark.via.gp"* ]] || [[ "$url" == *"d.apkpure.com/b/APK/com.android.vending"* ]]; then
+                        cp -f "{valid_apk.as_posix()}" "$out"
+                        return 0
+                    fi
+                    return 22
+                }}
+                _port::install_preinstalled_apps || exit 93
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue((port / 'product' / 'app' / 'Via' / 'Via.apk').is_file())
+            self.assertTrue((port / 'product' / 'priv-app' / 'Phonesky' / 'Phonesky.apk').is_file())
+            urls = (root / 'urls.log').read_text(encoding='utf-8').splitlines()
+            self.assertIn('https://d.apkpure.com/b/APK/mark.via.gp?version=latest', urls)
+            self.assertIn('https://d.apkpure.com/b/APK/com.android.vending?version=latest', urls)
+
+    def test_install_preinstalled_apps_falls_back_to_aptoide_when_apkpure_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = root / 'build' / 'portrom' / 'images'
+            (port / 'product').mkdir(parents=True, exist_ok=True)
+
+            valid_apk = root / 'valid.apk'
+            with zipfile.ZipFile(valid_apk, 'w', compression=zipfile.ZIP_STORED) as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest package="mark.via.gp"/>')
+                zf.writestr('classes.dex', b'x' * 600_000)
+
+            aptoide_json = root / 'aptoide.json'
+            aptoide_json.write_text(
+                '{"nodes":{"meta":{"data":{"package":"mark.via.gp","file":{"malware":{"rank":"TRUSTED"},"path":"https://pool.apk.aptoide.com/appupdater/via-test.apk"}}}}}',
+                encoding='utf-8',
+            )
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                install_via=true
+                install_play_store=false
+                install_kernelsu=false
+                _port::download_apkmirror_apk() {{ return 1; }}
+                curl() {{
+                    local out="" url="" expect_out="" after_dash=false arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            url="$arg"
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        fi
+                    done
+                    printf '%s\n' "$url" >> "{(root / 'urls.log').as_posix()}"
+                    if [[ "$url" == *"ws75.aptoide.com/api/7/app/get/package_name=mark.via.gp"* ]]; then
+                        cp -f "{aptoide_json.as_posix()}" "$out"
+                        return 0
+                    fi
+                    if [[ "$url" == "https://pool.apk.aptoide.com/appupdater/via-test.apk" ]]; then
+                        cp -f "{valid_apk.as_posix()}" "$out"
+                        return 0
+                    fi
+                    return 22
+                }}
+                _port::install_preinstalled_apps || exit 94
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue((port / 'product' / 'app' / 'Via' / 'Via.apk').is_file())
+            urls = (root / 'urls.log').read_text(encoding='utf-8').splitlines()
+            self.assertIn('https://pool.apk.aptoide.com/appupdater/via-test.apk', urls)
+
+    def test_install_preinstalled_apps_kernelsu_falls_back_to_expanded_assets_on_403(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = root / 'build' / 'portrom' / 'images'
+            (port / 'product').mkdir(parents=True, exist_ok=True)
+
+            valid_apk = root / 'ksu.apk'
+            with zipfile.ZipFile(valid_apk, 'w', compression=zipfile.ZIP_STORED) as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest package="me.weishu.kernelsu"/>')
+                zf.writestr('classes.dex', b'x' * 600_000)
+
+            expanded_html = root / 'expanded_assets.html'
+            expanded_html.write_text(
+                '<a href="/tiann/KernelSU/releases/download/v3.3.1/KernelSU_v3.3.1-release.apk">apk</a>\n',
+                encoding='utf-8',
+            )
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                install_via=false
+                install_play_store=false
+                install_kernelsu=true
+                curl() {{
+                    local out="" url="" expect_out="" after_dash=false has_I=false arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            url="$arg"
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        elif [[ "$arg" == *"I"* && "$arg" == -* ]]; then
+                            has_I=true
+                        fi
+                    done
+                    if [[ "$url" == *"api.github.com/"* ]]; then
+                        return 22
+                    fi
+                    if [[ "$url" == "https://github.com/tiann/KernelSU/releases/latest" && "$has_I" == true ]]; then
+                        printf 'https://github.com/tiann/KernelSU/releases/tag/v3.3.1'
+                        return 0
+                    fi
+                    if [[ "$url" == "https://github.com/tiann/KernelSU/releases/expanded_assets/v3.3.1" ]]; then
+                        cp -f "{expanded_html.as_posix()}" "$out"
+                        return 0
+                    fi
+                    if [[ "$url" == "https://github.com/tiann/KernelSU/releases/download/v3.3.1/KernelSU_v3.3.1-release.apk" ]]; then
+                        cp -f "{valid_apk.as_posix()}" "$out"
+                        return 0
+                    fi
+                    return 22
+                }}
+                _port::install_preinstalled_apps || exit 95
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue((port / 'product' / 'app' / 'KernelSU' / 'KernelSU.apk').is_file())
+
+    def test_write_ota_metadata_normalizes_rmx3300_and_respects_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tf = root / 'target_files'
+            (tf / 'MY_MANIFEST').mkdir(parents=True)
+            (tf / 'MY_MANIFEST/build.prop').write_text(
+                '\n'.join([
+                    'ro.build.fingerprint=OnePlus/RMX3300/RE547F:17/CP2A.260605.016/1:user/release-keys',
+                    'ro.build.version.incremental=1794225082897',
+                    'ro.build.version.sdk=37',
+                    'ro.build.date.utc=1794225082',
+                    'ro.product.device=RE547F',
+                ]) + '\n',
+                encoding='utf-8',
+            )
+            out_default = root / 'metadata_default'
+            out_override = root / 'metadata_override'
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                _port::write_ota_metadata "{tf.as_posix()}" "{out_default.as_posix()}" || exit 2
+                PORT_OTA_PRE_DEVICE=RE547F _port::write_ota_metadata "{tf.as_posix()}" "{out_override.as_posix()}" || exit 3
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            meta_default = dict(
+                line.split('=', 1)
+                for line in out_default.read_text(encoding='utf-8').splitlines()
+                if '=' in line
+            )
+            meta_override = dict(
+                line.split('=', 1)
+                for line in out_override.read_text(encoding='utf-8').splitlines()
+                if '=' in line
+            )
+            self.assertEqual(meta_default['pre-device'], 'RED8ACL1')
+            self.assertEqual(meta_override['pre-device'], 'RE547F')
+
+    def test_get_super_size_includes_realme_gt2_pro(self):
+        for dev in ('RE547F', 'RED8ACL1', 'RMX3300', 'RMX3301'):
+            res = self.run_bash(f'bash bin/getSuperSize.sh "{dev}"')
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual(res.stdout.strip(), '11274289152', dev)
+
+    def test_stock_ota_super_classification_includes_dlkm_partitions(self):
+        text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('[[ "$partname" == "odm_dlkm" || "$partname" == "vendor_dlkm" || "$partname" == "system_dlkm" ]]', text)
+        self.assertNotIn('if [ ! -d build/portrom/images/system_dlkm ];then', text)
+
+    def test_extract_portrom_part_skips_absent_optional_dlkm_partitions(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / 'build' / 'portrom' / 'images').mkdir(parents=True, exist_ok=True)
+            (root / 'build' / 'baserom' / 'images').mkdir(parents=True, exist_ok=True)
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                for part in system_dlkm vendor_dlkm odm_dlkm my_preload my_company; do
+                    _port::extract_portrom_part "${{part}}" || exit 1
+                done
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_install_preinstalled_apps_kernelsu_downloads_pinned_actions_run(self):
+        config_text = PORT_CONFIG.read_text(encoding='utf-8')
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('ksu_manager_run_id=44884831714', config_text)
+        self.assertIn('ksu_manager_run_id=', port_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = root / 'build' / 'portrom' / 'images'
+            (port / 'product').mkdir(parents=True, exist_ok=True)
+
+            valid_apk = root / 'KernelSU_v3.3.1-55-g2a60b289_32735-release.apk'
+            with zipfile.ZipFile(valid_apk, 'w', compression=zipfile.ZIP_STORED) as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest package="me.weishu.kernelsu"/>')
+                zf.writestr('classes.dex', b'k' * 600_000)
+
+            manager_zip = root / 'manager.zip'
+            with zipfile.ZipFile(manager_zip, 'w', compression=zipfile.ZIP_STORED) as zf:
+                zf.write(valid_apk, arcname=valid_apk.name)
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                install_via=false
+                install_play_store=false
+                install_kernelsu=true
+                ksu_manager_run_id=44884831714
+                curl() {{
+                    local out="" url="" expect_out="" after_dash=false arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            url="$arg"
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        fi
+                    done
+                    if [[ "$url" == "https://nightly.link/tiann/KernelSU/actions/runs/44884831714/manager.zip" ]]; then
+                        cp -f "{manager_zip.as_posix()}" "$out"
+                        return 0
+                    fi
+                    return 22
+                }}
+                _port::install_preinstalled_apps || exit 96
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue((root / 'assets' / 'preinstall' / 'KernelSU-run-44884831714.apk').is_file())
+            self.assertTrue((port / 'product' / 'app' / 'KernelSU' / 'KernelSU.apk').is_file())
+
+    def test_patch_apollo_backlight_xml_normalizes_pcc_and_preserves_nits(self):
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('_port::patch_apollo_backlight_xml', port_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            etc = root / 'build' / 'portrom' / 'images' / 'my_product' / 'vendor' / 'etc'
+            etc.mkdir(parents=True, exist_ok=True)
+
+            legacy_xml = etc / 'display_apollo_list.xml'
+            legacy_orig = (
+                '<?xml version="1.0" encoding="UTF-8"?>\r\n'
+                '<!-- <Level>5   ,5   ,5   ,0.50000,0.50000,0.50000,0.50000,0.50000,0.50000</Level> -->\r\n'
+                '<filter-conf>\r\n'
+                '    <Levels apollo="mode_01" range="8191">\r\n'
+                '        <Level>4   ,4   ,4   ,1.00000,1.00000,1.00000,1.00000,1.00000,1.00000</Level>\r\n'
+                '        <Level>883 ,21  ,21  ,0.99728,0.99728,0.99728,0.99403,0.99403,0.99403</Level>\r\n'
+                '    </Levels>\r\n'
+                '</filter-conf>\r\n'
+            )
+            legacy_xml.write_bytes(legacy_orig.encode('utf-8'))
+
+            panel_xml = etc / 'display_apollo_list_AA569_panel.xml'
+            panel_orig = (
+                '<filter-conf>\r\n'
+                '    <Levels apollo="mode_01" range="8191">\r\n'
+                '        <Level>4    ,   17,   17, 0.997741, 0.997741, 0.997741, 0.995038, 0.995038, 0.995038,    1.988289</Level>\r\n'
+                '    </Levels>\r\n'
+                '</filter-conf>\r\n'
+            )
+            panel_xml.write_bytes(panel_orig.encode('utf-8'))
+
+            # Native same-version port (17 -> 17) must not modify the XMLs.
+            res_skip = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=17
+                port_android_version=17
+                _port::patch_apollo_backlight_xml || exit 2
+                '''
+            )
+            self.assertEqual(res_skip.returncode, 0, res_skip.stdout + res_skip.stderr)
+            self.assertEqual(legacy_xml.read_bytes(), legacy_orig.encode('utf-8'))
+            self.assertEqual(panel_xml.read_bytes(), panel_orig.encode('utf-8'))
+
+            # Cross-version port (15 -> 17) must normalize cols 3..8 while keeping CRLF and trailing nits.
+            res_patch = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=15
+                port_android_version=17
+                _port::patch_apollo_backlight_xml || exit 2
+                # Idempotent second pass
+                _port::patch_apollo_backlight_xml || exit 3
+                '''
+            )
+            self.assertEqual(res_patch.returncode, 0, res_patch.stdout + res_patch.stderr)
+
+            legacy_patched = legacy_xml.read_bytes().decode('utf-8')
+            self.assertIn('<!-- <Level>5   ,5   ,5   ,0.50000', legacy_patched)
+            self.assertIn('<Level>883 ,21  ,21  ,1.00000,1.00000,1.00000,1.00000,1.00000,1.00000</Level>\r\n', legacy_patched)
+
+            panel_patched = panel_xml.read_bytes().decode('utf-8')
+            self.assertIn(
+                '<Level>4    ,   17,   17, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000,    1.988289</Level>\r\n',
+                panel_patched,
+            )
+
+    def test_patch_legacy_vendor_sepolicy_adds_nlmsg_and_hal_rules_idempotently(self):
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('_port::patch_legacy_vendor_sepolicy', port_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            img = root / 'build' / 'portrom' / 'images'
+            plat_dir = img / 'system' / 'system' / 'etc' / 'selinux'
+            vendor_dir = img / 'vendor' / 'etc' / 'selinux'
+            sysext_dir = img / 'system_ext' / 'etc' / 'selinux'
+            for d in (plat_dir, vendor_dir, sysext_dir):
+                d.mkdir(parents=True, exist_ok=True)
+
+            (plat_dir / 'plat_sepolicy.cil').write_text(
+                '(class netlink_route_socket (nlmsg_read nlmsg_write nlmsg_readpriv nlmsg_getneigh nlmsg ))\n'
+                '(class qipcrtr_socket (create read write))\n'
+                '(type servicemanager)\n'
+                '(type system_app)\n'
+                '(type vndbinder_device)\n',
+                encoding='utf-8',
+            )
+            vendor_base = (
+                '(type vendor_netmgrd)\n'
+                '(type hal_cryptoeng_oplus)\n'
+                '(type hal_urcc_default)\n'
+                '(type vendor_latency_device)\n'
+                '(type hal_project_oplus_aidl)\n'
+                '(type occe_create)\n'
+                '(type rild)\n'
+                '(type hal_oplus_rpmh_aidl_default)\n'
+            )
+            vendor_prod = vendor_dir / 'vendor_sepolicy.cil'
+            vendor_dbg = vendor_dir / 'vendor_sepolicy_debug.cil'
+            vendor_prod.write_text(vendor_base, encoding='utf-8')
+            vendor_dbg.write_text(vendor_base, encoding='utf-8')
+
+            sysext_base = '(type oplus_dump_netcfg)\n(type criticallog)\n'
+            sysext_prod = sysext_dir / 'system_ext_sepolicy.cil'
+            sysext_dbg = sysext_dir / 'system_ext_sepolicy_debug.cil'
+            sysext_prod.write_text(sysext_base, encoding='utf-8')
+            sysext_dbg.write_text(sysext_base, encoding='utf-8')
+
+            # Same-version port (17 -> 17) must be a no-op.
+            res_skip = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=17
+                port_android_version=17
+                _port::patch_legacy_vendor_sepolicy || exit 2
+                '''
+            )
+            self.assertEqual(res_skip.returncode, 0, res_skip.stdout + res_skip.stderr)
+            self.assertEqual(vendor_prod.read_text(encoding='utf-8'), vendor_base)
+            self.assertEqual(sysext_prod.read_text(encoding='utf-8'), sysext_base)
+
+            # Cross-version port (12 -> 17) must add all rules idempotently to both prod & debug.
+            res_patch = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=12
+                port_android_version=17
+                _port::patch_legacy_vendor_sepolicy || exit 2
+                _port::patch_legacy_vendor_sepolicy || exit 3
+                '''
+            )
+            self.assertEqual(res_patch.returncode, 0, res_patch.stdout + res_patch.stderr)
+
+            expected_vendor_rules = [
+                '(allow vendor_netmgrd self (netlink_route_socket (nlmsg)))',
+                '(allowx vendor_netmgrd self (nlmsg netlink_route_socket ((range 0x10 0x7a))))',
+                '(allow hal_cryptoeng_oplus self (qipcrtr_socket (create read write getattr setattr lock append bind connect getopt setopt shutdown)))',
+                '(allow hal_urcc_default vendor_latency_device (chr_file (open read write getattr ioctl)))',
+                '(allow criticallog hal_project_oplus_aidl (binder (call)))',
+                '(allow occe_create servicemanager (binder (call)))',
+                '(allow rild system_app (binder (call)))',
+                '(allow hal_oplus_rpmh_aidl_default vndbinder_device (chr_file (ioctl read write getattr lock append map open)))',
+            ]
+            for path in (vendor_prod, vendor_dbg):
+                text = path.read_text(encoding='utf-8')
+                for rule in expected_vendor_rules:
+                    self.assertEqual(text.splitlines().count(rule), 1, f'Missing or duplicated {rule} in {path}')
+
+            expected_sysext_rules = [
+                '(allow oplus_dump_netcfg self (netlink_route_socket (nlmsg)))',
+                '(allowx oplus_dump_netcfg self (nlmsg netlink_route_socket ((range 0x10 0x1d) (range 0x1f 0x7a))))',
+            ]
+            for path in (sysext_prod, sysext_dbg):
+                text = path.read_text(encoding='utf-8')
+                for rule in expected_sysext_rules:
+                    self.assertEqual(text.splitlines().count(rule), 1, f'Missing or duplicated {rule} in {path}')
+
+            # Omitting a type (e.g. vendor_latency_device) must skip the rule using it.
+            vendor_no_lat = vendor_base.replace('(type vendor_latency_device)\n', '')
+            vendor_prod.write_text(vendor_no_lat, encoding='utf-8')
+            vendor_dbg.write_text(vendor_no_lat, encoding='utf-8')
+            res_partial = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=12
+                port_android_version=17
+                _port::patch_legacy_vendor_sepolicy || exit 2
+                '''
+            )
+            self.assertEqual(res_partial.returncode, 0, res_partial.stdout + res_partial.stderr)
+            self.assertNotIn('vendor_latency_device', vendor_prod.read_text(encoding='utf-8'))
+
+    def test_patch_legacy_init_services_fixes_boot_failures_and_is_idempotent(self):
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('_port::patch_legacy_init_services', port_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            img = root / 'build' / 'portrom' / 'images'
+            init_rc = img / 'system' / 'system' / 'etc' / 'init' / 'hw' / 'init.rc'
+            a2l_sh = img / 'system' / 'system' / 'bin' / 'a2lrootfs.sh'
+            target_rc = img / 'vendor' / 'etc' / 'init' / 'hw' / 'init.target.rc'
+            for p in (init_rc, a2l_sh, target_rc):
+                p.parent.mkdir(parents=True, exist_ok=True)
+
+            init_rc_orig = (
+                'on property:sys.boot_completed=1\n'
+                '    exec_start dump_storaged_appio\n'
+            )
+            a2l_sh_orig = (
+                '#!/system/bin/sh\n'
+                f'rootfs="{(root / "missing_a2lrootfs").as_posix()}"\n'
+                'set_timezone()\n'
+                '{\n'
+                '    sleep 0.5\n'
+                '    chroot "$rootfs/" /usr/bin/ln -s /usr/share/zoneinfo/UTC /etc/localtime\n'
+                '}\n'
+                'if [ "$1" = "set_timezone" ]; then\n'
+                '    set_timezone\n'
+                'fi\n'
+            )
+            target_rc_orig = (
+                'on property:sys.boot_completed=1\n'
+                '    enable vendor.qvirtmgr\n'
+                '    start  vendor.qvirtmgr\n'
+            )
+            init_rc.write_text(init_rc_orig, encoding='utf-8')
+            a2l_sh.write_text(a2l_sh_orig, encoding='utf-8')
+            a2l_sh.chmod(0o755)
+            target_rc.write_text(target_rc_orig, encoding='utf-8')
+
+            # Same-version port (17 -> 17) must be a no-op.
+            res_skip = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=17
+                port_android_version=17
+                _port::patch_legacy_init_services || exit 2
+                '''
+            )
+            self.assertEqual(res_skip.returncode, 0, res_skip.stdout + res_skip.stderr)
+            self.assertEqual(init_rc.read_text(encoding='utf-8'), init_rc_orig)
+            self.assertEqual(a2l_sh.read_text(encoding='utf-8'), a2l_sh_orig)
+            self.assertEqual(target_rc.read_text(encoding='utf-8'), target_rc_orig)
+
+            # Cross-version port (12 -> 17) must patch all three files idempotently.
+            res_patch = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=12
+                port_android_version=17
+                _port::patch_legacy_init_services || exit 2
+                _port::patch_legacy_init_services || exit 3
+                '''
+            )
+            self.assertEqual(res_patch.returncode, 0, res_patch.stdout + res_patch.stderr)
+
+            init_rc_text = init_rc.read_text(encoding='utf-8')
+            self.assertIn('    # Disabled for enforcing port builds: exec_start dump_storaged_appio\n', init_rc_text)
+            self.assertNotRegex(init_rc_text, r'(?m)^\s*exec_start\s+dump_storaged_appio\b')
+
+            a2l_text = a2l_sh.read_text(encoding='utf-8')
+            self.assertEqual(a2l_text.count('# Guard: skip container timezone setup when a2lrootfs is absent'), 1)
+            self.assertEqual(a2l_sh.stat().st_mode & 0o777, 0o755)
+            res_sh = subprocess.run(['sh', str(a2l_sh), 'set_timezone'], capture_output=True, text=True)
+            self.assertEqual(res_sh.returncode, 0, res_sh.stdout + res_sh.stderr)
+
+            target_rc_text = target_rc.read_text(encoding='utf-8')
+            self.assertIn('    # Disabled: vendor lacks vendor.qti.qvirt backend: enable vendor.qvirtmgr\n', target_rc_text)
+            self.assertIn('    # Disabled: vendor lacks vendor.qti.qvirt backend: start  vendor.qvirtmgr\n', target_rc_text)
+
+            # If vendor VINTF declares vendor.qti.qvirt, init.target.rc must stay untouched.
+            vintf_dir = img / 'vendor' / 'etc' / 'vintf'
+            vintf_dir.mkdir(parents=True, exist_ok=True)
+            (vintf_dir / 'manifest.xml').write_text('<hal><name>vendor.qti.qvirt</name></hal>\n', encoding='utf-8')
+            target_rc.write_text(target_rc_orig, encoding='utf-8')
+            res_keep_qvirt = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=12
+                port_android_version=17
+                _port::patch_legacy_init_services || exit 2
+                '''
+            )
+            self.assertEqual(res_keep_qvirt.returncode, 0, res_keep_qvirt.stdout + res_keep_qvirt.stderr)
+            self.assertEqual(target_rc.read_text(encoding='utf-8'), target_rc_orig)
 
 
 if __name__ == '__main__':

@@ -19,7 +19,7 @@ const AVB_MAGIC: &[u8; 4] = b"AVB0";
 const VBMETA_FLAGS_OFFSET: u64 = 123;
 const VBMETA_FLAGS_DISABLE: u8 = 0x03;
 
-const ALLOWED_DEBLOAT_ROOTS: &[&str] = &["my_product", "my_stock", "my_preload"];
+const ALLOWED_DEBLOAT_ROOTS: &[&str] = &["my_product", "my_stock", "my_preload", "system_ext"];
 
 #[derive(Debug, Parser)]
 #[command(
