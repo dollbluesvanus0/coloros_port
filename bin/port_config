@@ -56,6 +56,9 @@ enable_ksu=false
 # KernelSU GitHub repository configuration (optional)
 # ksu_repo_owner=tiann
 # ksu_repo_name=KernelSU
+# Pinned KernelSU Manager GitHub Actions run ID (tiann/KernelSU@2a60b28, v3.3.1-55-g2a60b289 / 32735).
+# Set to "latest" to download the latest GitHub release instead.
+ksu_manager_run_id=44884831714
 
 # 预装应用 (Via 浏览器、Google Play 商店、KernelSU 管理器)
 # Preinstalled apps (Via Browser, Google Play Store, KernelSU Manager)

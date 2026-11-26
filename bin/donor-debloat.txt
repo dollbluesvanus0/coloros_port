@@ -63,7 +63,6 @@ my_stock/priv-app/CodeBook
 my_stock/priv-app/Cota
 my_stock/priv-app/CTAutoRegist
 my_stock/priv-app/DCS
-my_stock/priv-app/DRS
 my_stock/priv-app/dmp
 my_stock/priv-app/HeyCast
 my_stock/priv-app/LinktoWindows

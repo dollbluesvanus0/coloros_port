@@ -153,6 +153,7 @@ remove_data_encryption="$(port_config_get remove_data_encryption false)"
 enable_ksu="$(port_config_get enable_ksu false)"
 ksu_repo_owner="$(port_config_get ksu_repo_owner tiann)"
 ksu_repo_name="$(port_config_get ksu_repo_name KernelSU)"
+ksu_manager_run_id="$(port_config_get ksu_manager_run_id 44884831714)"
 install_via="$(_port::lower "$(port_config_get install_via true)")"
 install_play_store="$(_port::lower "$(port_config_get install_play_store true)")"
 install_kernelsu="$(_port::lower "$(port_config_get install_kernelsu true)")"
@@ -2538,6 +2539,13 @@ if ! _port::stage_postdata_compat; then
     exit 1
 fi
 
+# Normalize legacy Apollo PCC coefficients when porting Android 16+ onto an
+# older vendor base so low brightness levels write directly to backlight sysfs.
+if ! _port::patch_apollo_backlight_xml; then
+    error "Apollo 背光映射修复失败" "Apollo backlight XML patch failed"
+    exit 1
+fi
+
 # Fix invalid framework color attributes after all device overlays and APK
 # rebuilds, before filesystem metadata generation. Keep SystemUI's signature.
 if ! _port::stage_systemui_color_compat; then
@@ -2562,6 +2570,14 @@ if ! _port::patch_performance_sepolicy; then
 fi
 if ! _port::patch_display_panel_sepolicy; then
     error "显示面板 SELinux 修复失败" "Display panel SELinux fix failed"
+    exit 1
+fi
+if ! _port::patch_legacy_vendor_sepolicy; then
+    error "旧 vendor SELinux 兼容修复失败" "Legacy vendor SELinux compatibility fix failed"
+    exit 1
+fi
+if ! _port::patch_legacy_init_services; then
+    error "旧 vendor init 服务兼容修复失败" "Legacy vendor init services compatibility fix failed"
     exit 1
 fi
 

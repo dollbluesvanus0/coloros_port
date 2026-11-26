@@ -78,11 +78,13 @@ class DebloatTests(unittest.TestCase):
         for expected in (
             'my_stock/del-app/KeKeUserCenterMember',
             'my_stock/priv-app/DCS',
-            'my_stock/priv-app/DRS',
             'my_stock/app/MSPService',
             'system_ext/app/LogTrialCommercial',
         ):
             self.assertIn(expected, manifest_text)
+        # DRS hosts the com.oplus.framework.network.drs providers used by
+        # system_server; removing it causes endless provider lookup errors.
+        self.assertNotIn('my_stock/priv-app/DRS', manifest_text)
         keep_sys_ext = self.put('system_ext/app/PowerMonitor/PowerMonitor.apk')
         drop_sys_ext = self.put('system_ext/app/LogTrialCommercial/LogTrialCommercial.apk')
         self.run_debloat()

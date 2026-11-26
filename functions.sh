@@ -2889,6 +2889,260 @@ _port::patch_display_panel_sepolicy() {
     mv -f "${prod_tmp}" "${odm_dir}/precompiled_sepolicy" || return 1
     mv -f "${debug_tmp}" "${odm_dir}/precompiled_sepolicy_debug" || return 1
 }
+
+# Android 16/17 frameworks enable the netlink_xperm policy capability, so every
+# NETLINK_ROUTE message now needs the generic "nlmsg" permission plus an allowx
+# range.  Legacy vendor domains only carry nlmsg_read/nlmsg_write and are denied
+# at boot (netmgrd, oplus_dump_netcfg).  A few Oplus vendor HALs also miss
+# socket/device permissions that the newer framework exercises.  Every rule is
+# type-gated, appended idempotently, and applied when init compiles the split
+# policy at boot (the port always changes plat_sepolicy, so the ODM
+# precompiled blob hash no longer matches).
+_port::patch_legacy_vendor_sepolicy() {
+    [[ "${PORT_DISABLE_LEGACY_SEPOLICY_FIX:-false}" == true ]] && return 0
+    case "${port_android_version:-}" in 16|17) ;; *) return 0 ;; esac
+    local base_ver="${base_android_version:-}"
+    if [[ "${base_ver}" =~ ^[0-9]+$ ]] && (( base_ver >= port_android_version )); then
+        return 0
+    fi
+
+    local image_root="${work_dir:-.}/build/portrom/images"
+    local plat_cil="${image_root}/system/system/etc/selinux/plat_sepolicy.cil"
+    local vendor_dir="${image_root}/vendor/etc/selinux"
+    local system_ext_dir="${image_root}/system_ext/etc/selinux"
+    [[ -f "${plat_cil}" && -f "${vendor_dir}/vendor_sepolicy.cil" ]] || return 0
+    # Only meaningful when the framework policy knows the generic nlmsg perm.
+    local have_nlmsg=false
+    grep -Eq '^\(class netlink_route_socket \([^)]*[[:space:]]nlmsg[[:space:]]*\)\)' "${plat_cil}" && have_nlmsg=true
+
+    _legacy_sepolicy_has_type() {
+        local type_name="$1" file
+        for file in "${vendor_dir}/vendor_sepolicy.cil" \
+            "${system_ext_dir}/system_ext_sepolicy.cil" "${plat_cil}"; do
+            [[ -f "${file}" ]] && grep -qE "^\\(type ${type_name}\\)$" "${file}" && return 0
+        done
+        return 1
+    }
+
+    _legacy_sepolicy_append() {
+        local rule target
+        local base_cil="$1"; shift
+        for target in "${base_cil}.cil" "${base_cil}_debug.cil"; do
+            [[ -f "${target}" ]] || continue
+            for rule in "$@"; do
+                grep -qxF -- "${rule}" "${target}" || printf '%s\n' "${rule}" >> "${target}" || return 1
+            done
+        done
+    }
+
+    local added=0
+    if [[ "${have_nlmsg}" == true ]] && _legacy_sepolicy_has_type vendor_netmgrd; then
+        _legacy_sepolicy_append "${vendor_dir}/vendor_sepolicy" \
+            '(allow vendor_netmgrd self (netlink_route_socket (nlmsg)))' \
+            '(allowx vendor_netmgrd self (nlmsg netlink_route_socket ((range 0x10 0x7a))))' || return 1
+        added=1
+    fi
+    if [[ "${have_nlmsg}" == true ]] && _legacy_sepolicy_has_type oplus_dump_netcfg \
+        && [[ -f "${system_ext_dir}/system_ext_sepolicy.cil" ]]; then
+        # 0x1e (RTM_GETNEIGH) stays excluded, matching the platform's
+        # neighbour-table privacy restrictions.
+        _legacy_sepolicy_append "${system_ext_dir}/system_ext_sepolicy" \
+            '(allow oplus_dump_netcfg self (netlink_route_socket (nlmsg)))' \
+            '(allowx oplus_dump_netcfg self (nlmsg netlink_route_socket ((range 0x10 0x1d) (range 0x1f 0x7a))))' || return 1
+        added=1
+    fi
+    if _legacy_sepolicy_has_type hal_cryptoeng_oplus \
+        && grep -qE '^\(class qipcrtr_socket[[:space:]]' "${plat_cil}"; then
+        _legacy_sepolicy_append "${vendor_dir}/vendor_sepolicy" \
+            '(allow hal_cryptoeng_oplus self (qipcrtr_socket (create read write getattr setattr lock append bind connect getopt setopt shutdown)))' || return 1
+        added=1
+    fi
+    if _legacy_sepolicy_has_type hal_urcc_default && _legacy_sepolicy_has_type vendor_latency_device; then
+        _legacy_sepolicy_append "${vendor_dir}/vendor_sepolicy" \
+            '(allow hal_urcc_default vendor_latency_device (chr_file (open read write getattr ioctl)))' || return 1
+        added=1
+    fi
+    if _legacy_sepolicy_has_type criticallog && _legacy_sepolicy_has_type hal_project_oplus_aidl; then
+        _legacy_sepolicy_append "${vendor_dir}/vendor_sepolicy" \
+            '(allow criticallog hal_project_oplus_aidl (binder (call)))' || return 1
+        added=1
+    fi
+    if _legacy_sepolicy_has_type occe_create && _legacy_sepolicy_has_type servicemanager; then
+        _legacy_sepolicy_append "${vendor_dir}/vendor_sepolicy" \
+            '(allow occe_create servicemanager (binder (call)))' || return 1
+        added=1
+    fi
+    if _legacy_sepolicy_has_type rild && _legacy_sepolicy_has_type system_app; then
+        _legacy_sepolicy_append "${vendor_dir}/vendor_sepolicy" \
+            '(allow rild system_app (binder (call)))' || return 1
+        added=1
+    fi
+    if _legacy_sepolicy_has_type hal_oplus_rpmh_aidl_default && _legacy_sepolicy_has_type vndbinder_device; then
+        _legacy_sepolicy_append "${vendor_dir}/vendor_sepolicy" \
+            '(allow hal_oplus_rpmh_aidl_default vndbinder_device (chr_file (ioctl read write getattr lock append map open)))' || return 1
+        added=1
+    fi
+    unset -f _legacy_sepolicy_has_type _legacy_sepolicy_append
+    if (( added )); then
+        green "已为旧 vendor 补充 Android 16/17 SELinux 兼容规则" \
+            "Added Android 16/17 SELinux compatibility rules for the legacy vendor"
+        (
+            cd "${work_dir:-.}" || exit 0
+            local rel_root="build/portrom/images"
+            local odm_dir="${rel_root}/odm/etc/selinux"
+            local policy_version compiler prod_tmp debug_tmp
+            compiler="$(_port::selinux_find_compiler 2>/dev/null)" || exit 0
+            policy_version="$(_port::selinux_policy_version 2>/dev/null)" || exit 0
+            mkdir -p "${odm_dir}" || exit 0
+            prod_tmp=$(mktemp "${odm_dir}/.precompiled_sepolicy.XXXXXX") || exit 0
+            debug_tmp=$(mktemp "${odm_dir}/.precompiled_sepolicy_debug.XXXXXX") || { rm -f "${prod_tmp}"; exit 0; }
+            if ! _port::selinux_compile_split_policy "${prod_tmp}" \
+                "${rel_root}/vendor/etc/selinux/vendor_sepolicy.cil" \
+                "${rel_root}/vendor/etc/selinux/plat_pub_versioned.cil" \
+                "${rel_root}/system_ext/etc/selinux/system_ext_sepolicy.cil" \
+                "${rel_root}/product/etc/selinux/product_sepolicy.cil" \
+                "${policy_version}" 2>/dev/null || \
+               ! _port::selinux_compile_split_policy "${debug_tmp}" \
+                "${rel_root}/vendor/etc/selinux/vendor_sepolicy_debug.cil" \
+                "${rel_root}/vendor/etc/selinux/plat_pub_versioned_debug.cil" \
+                "${rel_root}/system_ext/etc/selinux/system_ext_sepolicy_debug.cil" \
+                "${rel_root}/product/etc/selinux/product_sepolicy_debug.cil" \
+                "${policy_version}" 2>/dev/null; then
+                rm -f "${prod_tmp}" "${debug_tmp}"
+                exit 0
+            fi
+            mv -f "${prod_tmp}" "${odm_dir}/precompiled_sepolicy" || rm -f "${prod_tmp}" "${debug_tmp}"
+            mv -f "${debug_tmp}" "${odm_dir}/precompiled_sepolicy_debug" || rm -f "${debug_tmp}"
+        ) || true
+    fi
+    return 0
+}
+
+# Disable or guard legacy init services and hooks that fail on enforcing
+# cross-version ports (e.g., debug su shells, missing container rootfs, or
+# unbacked Qualcomm virtualization services).
+_port::patch_legacy_init_services() {
+    [[ "${PORT_DISABLE_LEGACY_INIT_FIX:-false}" == true ]] && return 0
+    case "${port_android_version:-}" in 16|17) ;; *) return 0 ;; esac
+    local base_ver="${base_android_version:-}"
+    if [[ "${base_ver}" =~ ^[0-9]+$ ]] && (( base_ver >= port_android_version )); then
+        return 0
+    fi
+
+    local image_root="${work_dir:-.}/build/portrom/images"
+    local init_rc="${image_root}/system/system/etc/init/hw/init.rc"
+    local a2l_sh="${image_root}/system/system/bin/a2lrootfs.sh"
+    local init_target_rc="${image_root}/vendor/etc/init/hw/init.target.rc"
+    local changed=0 tmp=""
+
+    if [[ -f "${init_rc}" ]] && grep -Eq '^[[:space:]]*exec_start[[:space:]]+dump_storaged_appio([[:space:]]|$)' "${init_rc}"; then
+        tmp=$(mktemp "${init_rc}.XXXXXX") || return 1
+        if awk '
+            /^[[:space:]]*exec_start[[:space:]]+dump_storaged_appio([[:space:]]|$)/ {
+                match($0, /^[[:space:]]*/)
+                indent = substr($0, 1, RLENGTH)
+                rest = substr($0, RLENGTH + 1)
+                print indent "# Disabled for enforcing port builds: " rest
+                next
+            }
+            { print }
+        ' "${init_rc}" > "${tmp}"; then
+            chmod --reference="${init_rc}" "${tmp}" 2>/dev/null || true
+            mv -f -- "${tmp}" "${init_rc}" || { rm -f -- "${tmp}"; return 1; }
+            changed=1
+        else
+            rm -f -- "${tmp}"
+            return 1
+        fi
+    fi
+
+    if [[ -f "${a2l_sh}" ]] && grep -Eq '^[[:space:]]*set_timezone[[:space:]]*\(\)' "${a2l_sh}" \
+        && ! grep -Fq '# Guard: skip container timezone setup when a2lrootfs is absent' "${a2l_sh}"; then
+        tmp=$(mktemp "${a2l_sh}.XXXXXX") || return 1
+        if python3 - "${a2l_sh}" "${tmp}" <<'PY'
+import re
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+with open(src, 'r', encoding='utf-8', errors='surrogateescape') as f:
+    lines = f.readlines()
+
+guard = [
+    '    # Guard: skip container timezone setup when a2lrootfs is absent\n',
+    '    if [ ! -f "$rootfs/usrimg" ] && [ ! -d "$rootfs/usr/share/zoneinfo" ]; then\n',
+    '        return 0\n',
+    '    fi\n',
+]
+
+out = []
+inserted = False
+i = 0
+while i < len(lines):
+    line = lines[i]
+    out.append(line)
+    if not inserted:
+        m = re.match(r'^\s*set_timezone\s*\(\)\s*(\{)?\s*$', line)
+        if m:
+            if m.group(1):
+                out.extend(guard)
+                inserted = True
+            else:
+                j = i + 1
+                while j < len(lines):
+                    out.append(lines[j])
+                    if lines[j].strip().startswith('{'):
+                        out.extend(guard)
+                        inserted = True
+                        i = j
+                        break
+                    j += 1
+    i += 1
+
+if not inserted:
+    sys.exit(2)
+
+with open(dst, 'w', encoding='utf-8', errors='surrogateescape') as f:
+    f.writelines(out)
+PY
+        then
+            chmod --reference="${a2l_sh}" "${tmp}" 2>/dev/null || true
+            mv -f -- "${tmp}" "${a2l_sh}" || { rm -f -- "${tmp}"; return 1; }
+            changed=1
+        else
+            rm -f -- "${tmp}"
+            return 1
+        fi
+    fi
+
+    if [[ -f "${init_target_rc}" ]] \
+        && grep -Eq '^[[:space:]]*(enable|start)[[:space:]]+vendor\.qvirtmgr([[:space:]]|$)' "${init_target_rc}" \
+        && ! grep -rq 'vendor\.qti\.qvirt' "${image_root}/vendor/etc/vintf" 2>/dev/null; then
+        tmp=$(mktemp "${init_target_rc}.XXXXXX") || return 1
+        if awk '
+            /^[[:space:]]*(enable|start)[[:space:]]+vendor\.qvirtmgr([[:space:]]|$)/ {
+                match($0, /^[[:space:]]*/)
+                indent = substr($0, 1, RLENGTH)
+                rest = substr($0, RLENGTH + 1)
+                print indent "# Disabled: vendor lacks vendor.qti.qvirt backend: " rest
+                next
+            }
+            { print }
+        ' "${init_target_rc}" > "${tmp}"; then
+            chmod --reference="${init_target_rc}" "${tmp}" 2>/dev/null || true
+            mv -f -- "${tmp}" "${init_target_rc}" || { rm -f -- "${tmp}"; return 1; }
+            changed=1
+        else
+            rm -f -- "${tmp}"
+            return 1
+        fi
+    fi
+
+    if (( changed )); then
+        green "已修复旧 vendor 兼容 init 服务配置" \
+            "Patched legacy vendor incompatible init services"
+    fi
+    return 0
+}
 _port::postdata_badging_lines() {
     local apk="$1"
     "${PORT_POSTDATA_AAPT2}" dump badging "${apk}" 2>/dev/null \
@@ -3809,6 +4063,117 @@ _port::stage_postdata_compat() {
     return 0
 }
 
+_port::patch_apollo_backlight_xml() {
+    local image_root="${work_dir:-.}/build/portrom/images"
+    local etc_dir="${image_root}/my_product/vendor/etc"
+    local port_ver="${port_android_version:-}"
+    local base_ver="${base_android_version:-}"
+    port_ver="${port_ver%%.*}"
+    base_ver="${base_ver%%.*}"
+
+    [[ "${PORT_DISABLE_APOLLO_PCC_FIX:-false}" == "true" ]] && return 0
+    [[ "${port_ver}" =~ ^[0-9]+$ ]] && (( port_ver >= 16 )) || return 0
+    if [[ "${base_ver}" =~ ^[0-9]+$ ]] && (( base_ver >= port_ver )); then
+        return 0
+    fi
+    [[ -d "${etc_dir}" ]] || return 0
+
+    local -a apollo_files=()
+    local prev_nullglob=0
+    shopt -q nullglob && prev_nullglob=1
+    shopt -s nullglob
+    apollo_files=("${etc_dir}"/display_apollo_list*.xml)
+    (( prev_nullglob )) || shopt -u nullglob
+
+    [[ ${#apollo_files[@]} -gt 0 ]] || return 0
+
+    # Legacy vendor SDM ApolloService uses synchronous DRM commit when any of
+    # the 6 PCC coefficients differs from 1.0, which stalls low backlight levels
+    # under Android 16/17 SurfaceFlinger until HBM turns off (unlock black screen).
+    # Normalizing the 6 PCC coefficients (columns 3..8) to 1.0 forces direct sysfs
+    # panel backlight updates while preserving levels and trailing nit columns.
+    python3 - "${apollo_files[@]}" <<'PY'
+import os
+import re
+import shutil
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+
+block_re = re.compile(r"(<!--.*?-->)|(<Level>)([^<]+)(</Level>)", re.DOTALL)
+num_re = re.compile(r"^([ \t]*)([+-]?\d+(?:\.\d+)?)([ \t]*)$")
+
+
+def patch_file(path: str) -> int:
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    text = raw.decode("utf-8")
+    changed_rows = 0
+
+    def repl(match: re.Match) -> str:
+        nonlocal changed_rows
+        if match.group(1) is not None:
+            return match.group(1)
+        open_tag, inner, close_tag = match.group(2), match.group(3), match.group(4)
+        parts = inner.split(",")
+        if len(parts) < 9:
+            return match.group(0)
+        if not all(parts[idx].strip().isdigit() for idx in range(3)):
+            return match.group(0)
+
+        row_changed = False
+        for idx in range(3, 9):
+            m_num = num_re.match(parts[idx])
+            if not m_num:
+                return match.group(0)
+            lead, val_str, trail = m_num.groups()
+            val = float(val_str)
+            if abs(val - 1.0) > 1e-9:
+                dec_len = len(val_str.split(".", 1)[1]) if "." in val_str else 5
+                parts[idx] = f"{lead}1.{'0' * dec_len}{trail}"
+                row_changed = True
+        if row_changed:
+            changed_rows += 1
+            return f"{open_tag}{','.join(parts)}{close_tag}"
+        return match.group(0)
+
+    updated = block_re.sub(repl, text)
+    if changed_rows == 0:
+        return 0
+
+    ET.fromstring(updated)
+    parent = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".apollo_xml.", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(fd, "wb") as out_fh:
+            out_fh.write(updated.encode("utf-8"))
+        shutil.copymode(path, tmp_path)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+    return changed_rows
+
+
+total_changed = 0
+for file_path in sys.argv[1:]:
+    rows = patch_file(file_path)
+    total_changed += rows
+    if rows > 0:
+        print(f"PATCHED:{os.path.basename(file_path)}:{rows}")
+sys.exit(0)
+PY
+    local rc=$?
+    if [[ ${rc} -ne 0 ]]; then
+        error "修复 Apollo 背光 XML (display_apollo_list*.xml) 失败" \
+            "Failed to normalize Apollo backlight XML (display_apollo_list*.xml)"
+        return "${rc}"
+    fi
+    green "已检查/修复 Apollo 背光 PCC 映射（避免解锁后低亮度黑屏）" \
+        "Checked/normalized Apollo backlight PCC tables to prevent low-brightness unlock black screen"
+}
+
 _port::stage_rom_optimizations() {
     local image_root="build/portrom/images"
     [[ -d "${image_root}" ]] || return 0
@@ -4222,33 +4587,87 @@ _port::install_preinstalled_apps() {
     fi
 
     if [[ "${use_ksu}" == "true" ]]; then
+        local ksu_owner="${ksu_repo_owner:-tiann}"
+        local ksu_repo="${ksu_repo_name:-KernelSU}"
+        local ksu_run_id="${PORT_KSU_MANAGER_RUN_ID:-${ksu_manager_run_id:-44884831714}}"
+        local ksu_custom_url="${PORT_KSU_MANAGER_URL:-}"
+        local ksu_cache_name="KernelSU.apk"
+        if [[ -n "${ksu_run_id}" && "${ksu_run_id}" != "latest" && -z "${ksu_custom_url}" ]]; then
+            ksu_cache_name="KernelSU-run-${ksu_run_id}.apk"
+        fi
+
         local ksu_apk=""
         ksu_apk="$(_port::find_local_preinstall_apk \
             "devices/common/apps/KernelSU" \
             "devices/common/kernelsu" \
-            "assets/preinstall/KernelSU.apk" 2>/dev/null)" || ksu_apk=""
+            "assets/preinstall/${ksu_cache_name}" 2>/dev/null)" || ksu_apk=""
         if [[ -z "${ksu_apk}" ]]; then
-            local ksu_owner="${ksu_repo_owner:-tiann}"
-            local ksu_repo="${ksu_repo_name:-KernelSU}"
-            local json_tmp ksu_apk_url
             mkdir -p "${cache_dir}" || return 1
-            json_tmp="$(mktemp "${cache_dir}/.ksu_release.XXXXXX")" || return 1
-            if ! _port::fetch_github_latest_release_doc "${ksu_owner}" "${ksu_repo}" "${json_tmp}"; then
+            ksu_apk="${cache_dir}/${ksu_cache_name}"
+
+            if [[ -n "${ksu_custom_url}" ]]; then
+                blue "从自定义链接下载 KernelSU 管理器 APK..." "Downloading KernelSU Manager APK from custom URL..."
+                if ! _port::download_valid_apk "${ksu_custom_url}" "${ksu_apk}" 500000; then
+                    error "下载 KernelSU 管理器 APK 失败" "Failed to download KernelSU Manager APK"
+                    return 1
+                fi
+            elif [[ -n "${ksu_run_id}" && "${ksu_run_id}" != "latest" ]]; then
+                local ksu_zip_tmp ksu_extract_dir ksu_extracted_apk
+                ksu_zip_tmp="$(mktemp "${cache_dir}/.ksu_mgr_${ksu_run_id}.XXXXXX.zip")" || return 1
+                ksu_extract_dir="$(mktemp -d "${cache_dir}/.ksu_mgr_ext.XXXXXX")" || {
+                    rm -f -- "${ksu_zip_tmp}"
+                    return 1
+                }
+                local ksu_artifact_ok=false
+                local ksu_nightly_url="https://nightly.link/${ksu_owner}/${ksu_repo}/actions/runs/${ksu_run_id}/manager.zip"
+                blue "下载指定版本 KernelSU 管理器 (run ${ksu_run_id})..." "Downloading pinned KernelSU Manager (run ${ksu_run_id})..."
+                if curl -fsSL --connect-timeout 15 --max-time 180 --retry 2 --retry-delay 2 -o "${ksu_zip_tmp}" -- "${ksu_nightly_url}" 2>/dev/null \
+                    && unzip -oq "${ksu_zip_tmp}" -d "${ksu_extract_dir}" 2>/dev/null; then
+                    ksu_extracted_apk="$(find "${ksu_extract_dir}" -type f -name '*.apk' -print -quit 2>/dev/null || true)"
+                    if [[ -n "${ksu_extracted_apk}" && -f "${ksu_extracted_apk}" ]]; then
+                        local extracted_size
+                        extracted_size="$(wc -c < "${ksu_extracted_apk}" 2>/dev/null || printf '0')"
+                        if [[ "${extracted_size}" =~ ^[0-9]+$ ]] && (( extracted_size >= 500000 )) \
+                            && unzip -tq "${ksu_extracted_apk}" >/dev/null 2>&1 \
+                            && unzip -Z1 "${ksu_extracted_apk}" 2>/dev/null | grep -qx 'AndroidManifest\.xml'; then
+                            mv -f -- "${ksu_extracted_apk}" "${ksu_apk}" && ksu_artifact_ok=true
+                        fi
+                    fi
+                fi
+                rm -rf -- "${ksu_zip_tmp}" "${ksu_extract_dir}"
+
+                if [[ "${ksu_artifact_ok}" != "true" ]]; then
+                    yellow "指定 KernelSU Actions 构建 (run ${ksu_run_id}) 下载失败，回退至最新 Release..." \
+                        "Pinned KernelSU Actions artifact (run ${ksu_run_id}) unavailable; falling back to latest release..."
+                    ksu_run_id="latest"
+                    ksu_apk="${cache_dir}/KernelSU.apk"
+                    local ksu_fallback_cached=""
+                    ksu_fallback_cached="$(_port::find_local_preinstall_apk "assets/preinstall/KernelSU.apk" 2>/dev/null || true)"
+                    if [[ -n "${ksu_fallback_cached}" && -f "${ksu_fallback_cached}" ]]; then
+                        ksu_apk="${ksu_fallback_cached}"
+                    fi
+                fi
+            fi
+
+            if [[ -z "${ksu_custom_url}" && ( -z "${ksu_run_id}" || "${ksu_run_id}" == "latest" ) && ! -f "${ksu_apk}" ]]; then
+                local json_tmp ksu_apk_url
+                json_tmp="$(mktemp "${cache_dir}/.ksu_release.XXXXXX")" || return 1
+                if ! _port::fetch_github_latest_release_doc "${ksu_owner}" "${ksu_repo}" "${json_tmp}"; then
+                    rm -f -- "${json_tmp}"
+                    error "查询 KernelSU 最新发布失败" "Failed to query KernelSU latest release"
+                    return 1
+                fi
+                ksu_apk_url="$(_port::extract_github_asset_url "${json_tmp}" "${ksu_owner}" "${ksu_repo}" 'KernelSU[^"]*\.apk' 2>/dev/null || true)"
                 rm -f -- "${json_tmp}"
-                error "查询 KernelSU 最新发布失败" "Failed to query KernelSU latest release"
-                return 1
-            fi
-            ksu_apk_url="$(_port::extract_github_asset_url "${json_tmp}" "${ksu_owner}" "${ksu_repo}" 'KernelSU[^"]*\.apk' 2>/dev/null || true)"
-            rm -f -- "${json_tmp}"
-            if [[ -z "${ksu_apk_url}" ]]; then
-                error "未找到 KernelSU APK 下载链接" "KernelSU APK download URL not found"
-                return 1
-            fi
-            ksu_apk="${cache_dir}/KernelSU.apk"
-            blue "下载 KernelSU 管理器 APK..." "Downloading KernelSU Manager APK..."
-            if ! _port::download_valid_apk "${ksu_apk_url}" "${ksu_apk}" 500000; then
-                error "下载 KernelSU 管理器 APK 失败" "Failed to download KernelSU Manager APK"
-                return 1
+                if [[ -z "${ksu_apk_url}" ]]; then
+                    error "未找到 KernelSU APK 下载链接" "KernelSU APK download URL not found"
+                    return 1
+                fi
+                blue "下载 KernelSU 管理器 APK..." "Downloading KernelSU Manager APK..."
+                if ! _port::download_valid_apk "${ksu_apk_url}" "${ksu_apk}" 500000; then
+                    error "下载 KernelSU 管理器 APK 失败" "Failed to download KernelSU Manager APK"
+                    return 1
+                fi
             fi
         fi
         _port::install_apk_to_partition "${ksu_apk}" "KernelSU" "product/app" || return 1

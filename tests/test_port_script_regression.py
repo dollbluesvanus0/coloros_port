@@ -873,6 +873,343 @@ class PortScriptShellBehaviorTests(unittest.TestCase):
             )
             self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
+    def test_install_preinstalled_apps_kernelsu_downloads_pinned_actions_run(self):
+        config_text = PORT_CONFIG.read_text(encoding='utf-8')
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('ksu_manager_run_id=44884831714', config_text)
+        self.assertIn('ksu_manager_run_id=', port_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            port = root / 'build' / 'portrom' / 'images'
+            (port / 'product').mkdir(parents=True, exist_ok=True)
+
+            valid_apk = root / 'KernelSU_v3.3.1-55-g2a60b289_32735-release.apk'
+            with zipfile.ZipFile(valid_apk, 'w', compression=zipfile.ZIP_STORED) as zf:
+                zf.writestr('AndroidManifest.xml', '<manifest package="me.weishu.kernelsu"/>')
+                zf.writestr('classes.dex', b'k' * 600_000)
+
+            manager_zip = root / 'manager.zip'
+            with zipfile.ZipFile(manager_zip, 'w', compression=zipfile.ZIP_STORED) as zf:
+                zf.write(valid_apk, arcname=valid_apk.name)
+
+            res = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                cd "{root.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                install_via=false
+                install_play_store=false
+                install_kernelsu=true
+                ksu_manager_run_id=44884831714
+                curl() {{
+                    local out="" url="" expect_out="" after_dash=false arg
+                    for arg in "$@"; do
+                        if [[ "$after_dash" == true ]]; then
+                            url="$arg"
+                            continue
+                        fi
+                        if [[ "$arg" == "--" ]]; then
+                            after_dash=true
+                            continue
+                        fi
+                        if [[ -n "$expect_out" ]]; then
+                            out="$arg"
+                            expect_out=""
+                        elif [[ "$arg" == "-o" ]]; then
+                            expect_out=1
+                        fi
+                    done
+                    if [[ "$url" == "https://nightly.link/tiann/KernelSU/actions/runs/44884831714/manager.zip" ]]; then
+                        cp -f "{manager_zip.as_posix()}" "$out"
+                        return 0
+                    fi
+                    return 22
+                }}
+                _port::install_preinstalled_apps || exit 96
+                '''
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertTrue((root / 'assets' / 'preinstall' / 'KernelSU-run-44884831714.apk').is_file())
+            self.assertTrue((port / 'product' / 'app' / 'KernelSU' / 'KernelSU.apk').is_file())
+
+    def test_patch_apollo_backlight_xml_normalizes_pcc_and_preserves_nits(self):
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('_port::patch_apollo_backlight_xml', port_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            etc = root / 'build' / 'portrom' / 'images' / 'my_product' / 'vendor' / 'etc'
+            etc.mkdir(parents=True, exist_ok=True)
+
+            legacy_xml = etc / 'display_apollo_list.xml'
+            legacy_orig = (
+                '<?xml version="1.0" encoding="UTF-8"?>\r\n'
+                '<!-- <Level>5   ,5   ,5   ,0.50000,0.50000,0.50000,0.50000,0.50000,0.50000</Level> -->\r\n'
+                '<filter-conf>\r\n'
+                '    <Levels apollo="mode_01" range="8191">\r\n'
+                '        <Level>4   ,4   ,4   ,1.00000,1.00000,1.00000,1.00000,1.00000,1.00000</Level>\r\n'
+                '        <Level>883 ,21  ,21  ,0.99728,0.99728,0.99728,0.99403,0.99403,0.99403</Level>\r\n'
+                '    </Levels>\r\n'
+                '</filter-conf>\r\n'
+            )
+            legacy_xml.write_bytes(legacy_orig.encode('utf-8'))
+
+            panel_xml = etc / 'display_apollo_list_AA569_panel.xml'
+            panel_orig = (
+                '<filter-conf>\r\n'
+                '    <Levels apollo="mode_01" range="8191">\r\n'
+                '        <Level>4    ,   17,   17, 0.997741, 0.997741, 0.997741, 0.995038, 0.995038, 0.995038,    1.988289</Level>\r\n'
+                '    </Levels>\r\n'
+                '</filter-conf>\r\n'
+            )
+            panel_xml.write_bytes(panel_orig.encode('utf-8'))
+
+            # Native same-version port (17 -> 17) must not modify the XMLs.
+            res_skip = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=17
+                port_android_version=17
+                _port::patch_apollo_backlight_xml || exit 2
+                '''
+            )
+            self.assertEqual(res_skip.returncode, 0, res_skip.stdout + res_skip.stderr)
+            self.assertEqual(legacy_xml.read_bytes(), legacy_orig.encode('utf-8'))
+            self.assertEqual(panel_xml.read_bytes(), panel_orig.encode('utf-8'))
+
+            # Cross-version port (15 -> 17) must normalize cols 3..8 while keeping CRLF and trailing nits.
+            res_patch = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=15
+                port_android_version=17
+                _port::patch_apollo_backlight_xml || exit 2
+                # Idempotent second pass
+                _port::patch_apollo_backlight_xml || exit 3
+                '''
+            )
+            self.assertEqual(res_patch.returncode, 0, res_patch.stdout + res_patch.stderr)
+
+            legacy_patched = legacy_xml.read_bytes().decode('utf-8')
+            self.assertIn('<!-- <Level>5   ,5   ,5   ,0.50000', legacy_patched)
+            self.assertIn('<Level>883 ,21  ,21  ,1.00000,1.00000,1.00000,1.00000,1.00000,1.00000</Level>\r\n', legacy_patched)
+
+            panel_patched = panel_xml.read_bytes().decode('utf-8')
+            self.assertIn(
+                '<Level>4    ,   17,   17, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000,    1.988289</Level>\r\n',
+                panel_patched,
+            )
+
+    def test_patch_legacy_vendor_sepolicy_adds_nlmsg_and_hal_rules_idempotently(self):
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('_port::patch_legacy_vendor_sepolicy', port_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            img = root / 'build' / 'portrom' / 'images'
+            plat_dir = img / 'system' / 'system' / 'etc' / 'selinux'
+            vendor_dir = img / 'vendor' / 'etc' / 'selinux'
+            sysext_dir = img / 'system_ext' / 'etc' / 'selinux'
+            for d in (plat_dir, vendor_dir, sysext_dir):
+                d.mkdir(parents=True, exist_ok=True)
+
+            (plat_dir / 'plat_sepolicy.cil').write_text(
+                '(class netlink_route_socket (nlmsg_read nlmsg_write nlmsg_readpriv nlmsg_getneigh nlmsg ))\n'
+                '(class qipcrtr_socket (create read write))\n'
+                '(type servicemanager)\n'
+                '(type system_app)\n'
+                '(type vndbinder_device)\n',
+                encoding='utf-8',
+            )
+            vendor_base = (
+                '(type vendor_netmgrd)\n'
+                '(type hal_cryptoeng_oplus)\n'
+                '(type hal_urcc_default)\n'
+                '(type vendor_latency_device)\n'
+                '(type hal_project_oplus_aidl)\n'
+                '(type occe_create)\n'
+                '(type rild)\n'
+                '(type hal_oplus_rpmh_aidl_default)\n'
+            )
+            vendor_prod = vendor_dir / 'vendor_sepolicy.cil'
+            vendor_dbg = vendor_dir / 'vendor_sepolicy_debug.cil'
+            vendor_prod.write_text(vendor_base, encoding='utf-8')
+            vendor_dbg.write_text(vendor_base, encoding='utf-8')
+
+            sysext_base = '(type oplus_dump_netcfg)\n(type criticallog)\n'
+            sysext_prod = sysext_dir / 'system_ext_sepolicy.cil'
+            sysext_dbg = sysext_dir / 'system_ext_sepolicy_debug.cil'
+            sysext_prod.write_text(sysext_base, encoding='utf-8')
+            sysext_dbg.write_text(sysext_base, encoding='utf-8')
+
+            # Same-version port (17 -> 17) must be a no-op.
+            res_skip = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=17
+                port_android_version=17
+                _port::patch_legacy_vendor_sepolicy || exit 2
+                '''
+            )
+            self.assertEqual(res_skip.returncode, 0, res_skip.stdout + res_skip.stderr)
+            self.assertEqual(vendor_prod.read_text(encoding='utf-8'), vendor_base)
+            self.assertEqual(sysext_prod.read_text(encoding='utf-8'), sysext_base)
+
+            # Cross-version port (12 -> 17) must add all rules idempotently to both prod & debug.
+            res_patch = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=12
+                port_android_version=17
+                _port::patch_legacy_vendor_sepolicy || exit 2
+                _port::patch_legacy_vendor_sepolicy || exit 3
+                '''
+            )
+            self.assertEqual(res_patch.returncode, 0, res_patch.stdout + res_patch.stderr)
+
+            expected_vendor_rules = [
+                '(allow vendor_netmgrd self (netlink_route_socket (nlmsg)))',
+                '(allowx vendor_netmgrd self (nlmsg netlink_route_socket ((range 0x10 0x7a))))',
+                '(allow hal_cryptoeng_oplus self (qipcrtr_socket (create read write getattr setattr lock append bind connect getopt setopt shutdown)))',
+                '(allow hal_urcc_default vendor_latency_device (chr_file (open read write getattr ioctl)))',
+                '(allow criticallog hal_project_oplus_aidl (binder (call)))',
+                '(allow occe_create servicemanager (binder (call)))',
+                '(allow rild system_app (binder (call)))',
+                '(allow hal_oplus_rpmh_aidl_default vndbinder_device (chr_file (ioctl read write getattr lock append map open)))',
+            ]
+            for path in (vendor_prod, vendor_dbg):
+                text = path.read_text(encoding='utf-8')
+                for rule in expected_vendor_rules:
+                    self.assertEqual(text.splitlines().count(rule), 1, f'Missing or duplicated {rule} in {path}')
+
+            expected_sysext_rules = [
+                '(allow oplus_dump_netcfg self (netlink_route_socket (nlmsg)))',
+                '(allowx oplus_dump_netcfg self (nlmsg netlink_route_socket ((range 0x10 0x1d) (range 0x1f 0x7a))))',
+            ]
+            for path in (sysext_prod, sysext_dbg):
+                text = path.read_text(encoding='utf-8')
+                for rule in expected_sysext_rules:
+                    self.assertEqual(text.splitlines().count(rule), 1, f'Missing or duplicated {rule} in {path}')
+
+            # Omitting a type (e.g. vendor_latency_device) must skip the rule using it.
+            vendor_no_lat = vendor_base.replace('(type vendor_latency_device)\n', '')
+            vendor_prod.write_text(vendor_no_lat, encoding='utf-8')
+            vendor_dbg.write_text(vendor_no_lat, encoding='utf-8')
+            res_partial = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=12
+                port_android_version=17
+                _port::patch_legacy_vendor_sepolicy || exit 2
+                '''
+            )
+            self.assertEqual(res_partial.returncode, 0, res_partial.stdout + res_partial.stderr)
+            self.assertNotIn('vendor_latency_device', vendor_prod.read_text(encoding='utf-8'))
+
+    def test_patch_legacy_init_services_fixes_boot_failures_and_is_idempotent(self):
+        port_text = PORT_SH.read_text(encoding='utf-8')
+        self.assertIn('_port::patch_legacy_init_services', port_text)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            img = root / 'build' / 'portrom' / 'images'
+            init_rc = img / 'system' / 'system' / 'etc' / 'init' / 'hw' / 'init.rc'
+            a2l_sh = img / 'system' / 'system' / 'bin' / 'a2lrootfs.sh'
+            target_rc = img / 'vendor' / 'etc' / 'init' / 'hw' / 'init.target.rc'
+            for p in (init_rc, a2l_sh, target_rc):
+                p.parent.mkdir(parents=True, exist_ok=True)
+
+            init_rc_orig = (
+                'on property:sys.boot_completed=1\n'
+                '    exec_start dump_storaged_appio\n'
+            )
+            a2l_sh_orig = (
+                '#!/system/bin/sh\n'
+                f'rootfs="{(root / "missing_a2lrootfs").as_posix()}"\n'
+                'set_timezone()\n'
+                '{\n'
+                '    sleep 0.5\n'
+                '    chroot "$rootfs/" /usr/bin/ln -s /usr/share/zoneinfo/UTC /etc/localtime\n'
+                '}\n'
+                'if [ "$1" = "set_timezone" ]; then\n'
+                '    set_timezone\n'
+                'fi\n'
+            )
+            target_rc_orig = (
+                'on property:sys.boot_completed=1\n'
+                '    enable vendor.qvirtmgr\n'
+                '    start  vendor.qvirtmgr\n'
+            )
+            init_rc.write_text(init_rc_orig, encoding='utf-8')
+            a2l_sh.write_text(a2l_sh_orig, encoding='utf-8')
+            a2l_sh.chmod(0o755)
+            target_rc.write_text(target_rc_orig, encoding='utf-8')
+
+            # Same-version port (17 -> 17) must be a no-op.
+            res_skip = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=17
+                port_android_version=17
+                _port::patch_legacy_init_services || exit 2
+                '''
+            )
+            self.assertEqual(res_skip.returncode, 0, res_skip.stdout + res_skip.stderr)
+            self.assertEqual(init_rc.read_text(encoding='utf-8'), init_rc_orig)
+            self.assertEqual(a2l_sh.read_text(encoding='utf-8'), a2l_sh_orig)
+            self.assertEqual(target_rc.read_text(encoding='utf-8'), target_rc_orig)
+
+            # Cross-version port (12 -> 17) must patch all three files idempotently.
+            res_patch = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=12
+                port_android_version=17
+                _port::patch_legacy_init_services || exit 2
+                _port::patch_legacy_init_services || exit 3
+                '''
+            )
+            self.assertEqual(res_patch.returncode, 0, res_patch.stdout + res_patch.stderr)
+
+            init_rc_text = init_rc.read_text(encoding='utf-8')
+            self.assertIn('    # Disabled for enforcing port builds: exec_start dump_storaged_appio\n', init_rc_text)
+            self.assertNotRegex(init_rc_text, r'(?m)^\s*exec_start\s+dump_storaged_appio\b')
+
+            a2l_text = a2l_sh.read_text(encoding='utf-8')
+            self.assertEqual(a2l_text.count('# Guard: skip container timezone setup when a2lrootfs is absent'), 1)
+            self.assertEqual(a2l_sh.stat().st_mode & 0o777, 0o755)
+            res_sh = subprocess.run(['sh', str(a2l_sh), 'set_timezone'], capture_output=True, text=True)
+            self.assertEqual(res_sh.returncode, 0, res_sh.stdout + res_sh.stderr)
+
+            target_rc_text = target_rc.read_text(encoding='utf-8')
+            self.assertIn('    # Disabled: vendor lacks vendor.qti.qvirt backend: enable vendor.qvirtmgr\n', target_rc_text)
+            self.assertIn('    # Disabled: vendor lacks vendor.qti.qvirt backend: start  vendor.qvirtmgr\n', target_rc_text)
+
+            # If vendor VINTF declares vendor.qti.qvirt, init.target.rc must stay untouched.
+            vintf_dir = img / 'vendor' / 'etc' / 'vintf'
+            vintf_dir.mkdir(parents=True, exist_ok=True)
+            (vintf_dir / 'manifest.xml').write_text('<hal><name>vendor.qti.qvirt</name></hal>\n', encoding='utf-8')
+            target_rc.write_text(target_rc_orig, encoding='utf-8')
+            res_keep_qvirt = self.run_bash(
+                f'''
+                source "{FUNCTIONS_SH.as_posix()}" || exit 1
+                work_dir="{root.as_posix()}"
+                base_android_version=12
+                port_android_version=17
+                _port::patch_legacy_init_services || exit 2
+                '''
+            )
+            self.assertEqual(res_keep_qvirt.returncode, 0, res_keep_qvirt.stdout + res_keep_qvirt.stderr)
+            self.assertEqual(target_rc.read_text(encoding='utf-8'), target_rc_orig)
+
 
 if __name__ == '__main__':
     unittest.main()
